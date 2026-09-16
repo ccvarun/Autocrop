@@ -1,0 +1,13 @@
+# A .bat file with Unix line endings can fail on Windows in odd ways, so pin
+# them regardless of who clones this or on what.
+*.bat text eol=crlf
+*.txt text eol=crlf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.html text eol=lf
+
+# do not let git touch these
+*.onnx binary
+*.png  binary
+*.jpg  binary

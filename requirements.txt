@@ -1,0 +1,9 @@
+pillow>=9.0
+numpy>=1.23
+opencv-python-headless>=4.8
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0
+img2pdf>=0.4
+onnxruntime>=1.15
+pyinstaller>=6.0

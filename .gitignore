@@ -1,0 +1,39 @@
+# build products
+.venv-build/
+build/
+dist/
+DIST/
+*.spec
+__pycache__/
+*.pyc
+
+# output the tool writes next to someone's photos
+_parchi/
+_cropped/
+
+# photos: never commit anyone's parchis, and the receipt sets are not ours
+SAMPLES/
+_selftest_photos/
+demoted_debug/
+debug_*.jpg
+*_run.log
+
+# one-off investigation scripts, kept locally, not part of the tool
+adaptive_audit.py
+otsu_audit.py
+broad_audit_test.py
+check_drift.py
+check_drift2.py
+check_strat.py
+ml_probe.py
+test_audit.py
+*.orig-backup
+
+# personal packaging helper, has this machine's paths hardcoded
+package_release.py
+
+# editor and assistant scratch
+Claude/
+Claude outputs/
+.vscode/
+.idea/

@@ -1,0 +1,1018 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%233f7480'/%3E%3Crect x='4' y='3.5' width='8' height='9' rx='1' fill='%23fff'/%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crop</title>
+<style>
+  :root{
+    --bg:#f6f6f4; --panel:#fff; --ink:#1b1b19; --muted:#6e6e68;
+    --line:#e2e1dc; --accent:#3f7480; --accent-soft:#e8f0f1; --warn:#8a6a3a;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#17181a; --panel:#1f2023; --ink:#e9e8e4; --muted:#9a9a94;
+           --line:#323337; --accent:#6fa8b4; --accent-soft:#22333a; --warn:#c9a469; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{padding:18px 26px;border-bottom:1px solid var(--line);background:var(--panel);
+         display:flex;align-items:baseline;gap:14px;position:sticky;top:0;z-index:5}
+  header h1{margin:0;font-size:17px;font-weight:600;letter-spacing:.2px}
+  header .sub{color:var(--muted);font-size:13px}
+  main{max-width:1180px;margin:0 auto;padding:26px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+        padding:20px 22px;margin-bottom:18px}
+  .card h2{margin:0 0 4px;font-size:14px;font-weight:600;text-transform:uppercase;
+           letter-spacing:.7px;color:var(--muted)}
+  .hint{color:var(--muted);font-size:13px;margin:0 0 14px}
+  button{font:inherit;padding:8px 15px;border-radius:7px;border:1px solid var(--line);
+         background:var(--panel);color:var(--ink);cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:disabled{opacity:.45;cursor:default}
+  button.primary:disabled:hover{border-color:var(--accent)}
+  .crumb{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px;
+         font-size:13px;color:var(--muted);word-break:break-all}
+  .dirlist{max-height:230px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .dirlist div{padding:8px 13px;cursor:pointer;border-bottom:1px solid var(--line)}
+  .dirlist div:last-child{border-bottom:0}
+  .dirlist div:hover{background:var(--accent-soft)}
+  .dropzone{border:2px dashed var(--line);border-radius:10px;padding:26px 20px;
+            text-align:center;color:var(--muted);transition:.15s;margin-bottom:14px}
+  .dropzone.hot{border-color:var(--accent);background:var(--accent-soft);color:var(--ink)}
+  .dropzone b{color:var(--ink)}
+  .dropzone .or{display:block;margin-top:10px;font-size:13px}
+  .pathrow{display:flex;gap:8px;margin-bottom:12px}
+  .pathrow input{flex:1;font:inherit;padding:8px 11px;border-radius:7px;
+                 border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+  details.browse{margin-top:12px}
+  details.browse summary{cursor:pointer;color:var(--muted);font-size:13px}
+  .chosen{margin-top:12px;padding:11px 14px;border-radius:8px;background:var(--accent-soft);
+          font-size:14px;word-break:break-all}
+  .settings{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-end;margin:14px 0 4px}
+  label{display:block;font-size:13px;color:var(--muted);margin-bottom:5px}
+  input[type=range]{width:190px;accent-color:var(--accent)}
+  .val{font-variant-numeric:tabular-nums;color:var(--ink)}
+  .bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin:12px 0 8px}
+  .bar i{display:block;height:100%;background:var(--accent);width:0;transition:width .25s}
+  pre.log{margin:0;max-height:150px;overflow:auto;font-size:12.5px;color:var(--muted);
+          font-family:ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap}
+  .sweep{margin-top:12px;padding:12px 14px;border-radius:8px;background:var(--accent-soft);
+         display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13.5px}
+  .sweep button{white-space:nowrap}
+  .tally{display:flex;gap:10px;flex-wrap:wrap;margin-top:6px}
+  .pill{padding:5px 12px;border-radius:20px;border:1px solid var(--line);font-size:13px}
+  .pill b{font-variant-numeric:tabular-nums}
+  .pill.on{background:var(--accent-soft);border-color:var(--accent)}
+  /* editor: the photo and the crop it would produce, side by side, so the
+     corners are judged by the result rather than by four handles */
+  .stage{display:grid;gap:16px;align-items:start;
+         grid-template-columns:1fr 1fr 236px;
+         grid-template-areas:"before after side"}
+  .stage > .frame{grid-area:before}
+  .stage > .after{grid-area:after}
+  .stage > .side {grid-area:side}
+  /* one photo, full width, with the result underneath: for fiddly corners */
+  .stage.wide{grid-template-columns:1fr 236px;
+              grid-template-areas:"before side" "after side"}
+  .stage.wide > .frame, .stage.wide > .after{width:fit-content;max-width:100%;
+                                             margin-left:auto;margin-right:auto}
+  .stage.wide .canvasbox img{max-height:86vh}
+  .stage.wide .after img{max-height:66vh}
+  @media (max-width:1180px){
+    .stage{grid-template-columns:1fr 236px;
+           grid-template-areas:"before side" "after side"} }
+  @media (max-width:820px){
+    .stage, .stage.wide{grid-template-columns:1fr;
+           grid-template-areas:"before" "after" "side"} }
+  /* The rest of the page is capped at a comfortable reading width.  The two
+     panes are not read, they are compared, so on a wide monitor this one card
+     is allowed to spill past that cap and use the screen it is given. */
+  @media (min-width:1500px){ #step-review{margin-left:-160px;margin-right:-160px} }
+  @media (min-width:1820px){ #step-review{margin-left:-310px;margin-right:-310px} }
+  .frame{position:relative;background:var(--bg);border:1px solid var(--line);
+         border-radius:8px;overflow:hidden;display:flex;justify-content:center}
+  .canvasbox{position:relative;display:inline-block;line-height:0;max-width:100%}
+  .canvasbox img{display:block;max-width:100%;max-height:74vh;height:auto;
+                 width:auto;touch-action:none}
+  .canvasbox svg{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+  .quad{fill:rgba(63,116,128,.13);stroke:var(--accent);stroke-width:2}
+  .hand{fill:var(--panel);stroke:var(--accent);stroke-width:2.5;cursor:grab}
+  .hand:active{cursor:grabbing}
+  .hand.stuck{fill:var(--accent)}
+  .loupe{position:absolute;width:150px;height:150px;border-radius:50%;
+         border:2px solid var(--accent);box-shadow:0 3px 14px rgba(0,0,0,.28);
+         pointer-events:none;overflow:hidden;background:var(--panel);z-index:6}
+  .loupe canvas{display:block;width:150px;height:150px}
+  .loupe .cross{position:absolute;inset:0}
+  .loupe .cross:before,.loupe .cross:after{content:"";position:absolute;
+         background:var(--accent);opacity:.85}
+  .loupe .cross:before{left:50%;top:0;bottom:0;width:1px;margin-left:-.5px}
+  .loupe .cross:after{top:50%;left:0;right:0;height:1px;margin-top:-.5px}
+  .sidegrab{stroke:transparent;stroke-width:22;fill:none;cursor:move}
+  .sidegrab:hover{stroke:rgba(63,116,128,.18)}
+  .magnet{display:flex;align-items:center;gap:8px;margin:0 0 14px;font-size:13px;
+          color:var(--muted);cursor:pointer}
+  .magnet input{accent-color:var(--accent)}
+  .quad.snapping{stroke-dasharray:6 4}
+  /* the corner label both panes carry, so it is never a guess which is which */
+  .tag{position:absolute;top:9px;left:9px;z-index:6;background:rgba(18,20,22,.74);
+       color:#fff;font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;
+       padding:3px 10px;border-radius:20px;pointer-events:none;
+       font-weight:600}
+  .after{position:relative;border:1px solid var(--line);border-radius:8px;
+         background:var(--bg);overflow:hidden;display:flex;align-items:center;
+         justify-content:center;min-height:240px;padding:10px}
+  .after img{display:block;max-width:100%;max-height:74vh;width:auto;height:auto;
+             border-radius:3px;transition:opacity .12s}
+  .after .note{font-size:12.5px;color:var(--muted);text-align:center;
+               line-height:1.55;padding:0 16px;max-width:280px}
+  .after.stale img{opacity:.4}
+  .layout-toggle{width:100%;margin-bottom:12px;font-size:12.5px;text-align:center}
+  @media (max-width:820px){ .layout-toggle{display:none} }
+  /* break-all was splitting ordinary words mid-syllable in the narrow panel;
+     this still breaks a long filename, but only where it has to */
+  .side .meta{font-size:13px;color:var(--muted);margin-bottom:16px;
+              overflow-wrap:break-word}
+  .snapmsg{margin-top:6px;font-size:12.5px;line-height:1.45}
+  .side button{width:100%;margin-bottom:9px;text-align:left}
+  kbd{font:11px ui-monospace,Consolas,monospace;border:1px solid var(--line);
+      border-radius:4px;padding:1px 5px;color:var(--muted)}
+  .done-strip{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}
+  .done-strip h3{margin:0 0 10px;font-size:12px;font-weight:600;letter-spacing:.6px;
+                 text-transform:uppercase;color:var(--muted)}
+  .done-row{display:flex;gap:12px;flex-wrap:wrap}
+  .done-item{width:120px}
+  .done-item img{width:120px;height:110px;object-fit:contain;background:var(--bg);
+                 border:1px solid var(--line);border-radius:6px;display:block}
+  .done-item .n{font-size:11px;color:var(--muted);margin:5px 0 4px;
+                white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .done-item button{width:100%;padding:4px 6px;font-size:12px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+  .tile{border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer;
+        background:var(--panel)}
+  .tile:hover{border-color:var(--accent)}
+  .tile img{width:100%;height:120px;object-fit:cover;display:block;background:var(--bg)}
+  .tile .cap{padding:7px 9px;font-size:12px;color:var(--muted);
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .done{text-align:center;padding:38px 10px;color:var(--muted)}
+  /* comparison: a finished crop next to the photo it came from.  Deciding
+     whether a crop is good means seeing both at once, at a useful size. */
+  .lb{position:fixed;inset:0;z-index:40;background:rgba(14,16,18,.975);
+      backdrop-filter:blur(4px);
+      display:flex;flex-direction:column;padding:16px 20px 18px}
+  .lb-head{display:flex;align-items:center;gap:14px;color:#fff;flex-wrap:wrap;
+           padding-bottom:12px}
+  .lb-head b{font-size:15px;word-break:break-all}
+  .lb-head .sub{font-size:12.5px;color:#b9c0c4}
+  .lb-head .grow{flex:1}
+  .lb-body{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media (max-width:760px){ .lb-body{grid-template-columns:1fr} }
+  .lb-pane{position:relative;background:#1b1e20;border-radius:8px;overflow:hidden;
+           display:flex;align-items:center;justify-content:center;min-height:0}
+  .lb-pane img{max-width:100%;max-height:100%;width:auto;height:auto;display:block}
+  .lb-foot{display:flex;align-items:center;gap:10px;padding-top:13px;flex-wrap:wrap}
+  .lb-foot .hint{font-size:12.5px;color:#b9c0c4}
+  .lb button{background:#f4f6f7;border-color:#f4f6f7}
+  .lb button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .lb button:disabled{opacity:.5}
+  .done-item img{cursor:pointer}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>Crop</h1>
+  <span class="sub" id="headline">parchi photos, checked and cropped</span>
+</header>
+<main>
+
+<section class="card" id="step-folder">
+  <h2>1 &nbsp;Choose the folder of photos</h2>
+  <p class="hint">Subfolders are included. Your photos are never moved or changed.</p>
+
+  <div class="dropzone" id="drop">
+    <b>Drag the folder of photos here</b>
+    <span class="or">or <button id="browseBtn">Browse for it</button></span>
+  </div>
+
+  <div class="pathrow">
+    <input id="pathBox" placeholder="or paste the folder path, e.g. D:\Parchi\March" 
+           autocomplete="off" spellcheck="false">
+    <button id="pathBtn">Use this</button>
+  </div>
+
+  <details class="browse">
+    <summary>Or find it drive by drive</summary>
+    <div class="crumb" id="crumb"></div>
+    <div class="dirlist" id="dirlist"></div>
+  </details>
+
+  <div class="chosen hidden" id="chosen"></div>
+</section>
+
+<section class="card hidden" id="step-run">
+  <h2>2 &nbsp;Settings</h2>
+  <p class="hint">The defaults are usually right. Lower the confidence if too many
+     photos are being sent for checking; raise it if bad crops are getting through.</p>
+  <div class="settings">
+    <div>
+      <label>Confidence to crop outright: <span class="val" id="confVal">62</span></label>
+      <input type="range" id="conf" min="20" max="95" value="62">
+    </div>
+    <div>
+      <label>Extra margin around the crop: <span class="val" id="marVal">1</span>%</label>
+      <input type="range" id="mar" min="0" max="15" value="1">
+    </div>
+    <div>
+      <label><input type="checkbox" id="enh"> Lift contrast for faint pen</label>
+    </div>
+    <button class="primary" id="runBtn">Start</button>
+  </div>
+</section>
+
+<section class="card hidden" id="step-progress">
+  <h2>3 &nbsp;Working</h2>
+  <div class="bar"><i id="barFill"></i></div>
+  <p class="hint" id="progText"></p>
+  <pre class="log" id="log"></pre>
+</section>
+
+<section class="card hidden" id="step-review">
+  <h2>4 &nbsp;Check the ones it was unsure about</h2>
+  <p class="hint">Drag the four corners onto the edges of the parchi, then Crop.
+     <kbd>C</kbd> crop &nbsp; <kbd>K</kbd> keep whole photo &nbsp; <kbd>S</kbd> skip &nbsp; <kbd>M</kbd> snap to edges &nbsp; <kbd>arrows</kbd> nudge the last corner
+     (hold shift for bigger steps). Drag a whole edge by its line, not just the
+     corners.</p>
+  <div class="tally" id="tally"></div>
+  <div class="sweep hidden" id="sweep"></div>
+  <div id="editorWrap" style="margin-top:18px"></div>
+  <div class="done-strip hidden" id="doneStrip">
+    <h3>Just done</h3>
+    <div class="done-row" id="doneRow"></div>
+  </div>
+</section>
+
+<section class="card hidden" id="step-all">
+  <h2>Everything in this folder</h2>
+  <p class="hint" id="allHint"></p>
+  <div class="grid" id="grid"></div>
+</section>
+
+</main>
+
+<div class="lb hidden" id="compare">
+  <div class="lb-head">
+    <b id="cmpName"></b><span class="sub" id="cmpState"></span>
+    <span class="grow"></span>
+    <button id="cmpPrev">&#8592; Previous</button>
+    <button id="cmpNext">Next &#8594;</button>
+    <button id="cmpClose">Close</button>
+  </div>
+  <div class="lb-body">
+    <div class="lb-pane"><span class="tag">Original photo</span><img id="cmpA" alt=""></div>
+    <div class="lb-pane"><span class="tag">Saved crop</span><img id="cmpB" alt=""></div>
+  </div>
+  <div class="lb-foot">
+    <button class="primary" id="cmpFix">Crop this one again</button>
+    <button id="cmpUndo">Undo the crop</button>
+    <span class="hint">Esc closes &nbsp; &#8592; &#8594; move through the cropped photos</span>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let chosenFolder = "", results = [], queue = [], qi = 0, quad = null, imgBox = null;
+let justDone = [];
+
+/* ---------- folder picker ---------- */
+async function browse(path){
+  const r = await fetch("/api/browse?path=" + encodeURIComponent(path));
+  if(!r.ok){ alert("Cannot open that folder."); return; }
+  const d = await r.json();
+  const crumb = $("#crumb"); crumb.innerHTML = "";
+  const home = document.createElement("button");
+  home.textContent = "Drives"; home.onclick = () => browse("");
+  crumb.appendChild(home);
+  if(d.path){
+    const label = document.createElement("span"); label.textContent = d.path;
+    crumb.appendChild(label);
+  }
+  const list = $("#dirlist"); list.innerHTML = "";
+  if(d.up !== null && d.up !== undefined && d.path){
+    const up = document.createElement("div");
+    up.textContent = "↑  up one level";
+    up.onclick = () => browse(d.up);
+    list.appendChild(up);
+  }
+  d.dirs.forEach(dir => {
+    const row = document.createElement("div");
+    row.textContent = "\u{1F4C1}  " + dir.name;
+    row.onclick = () => browse(dir.path);
+    list.appendChild(row);
+  });
+  if(d.path) useFolder(d);
+}
+
+/* ---------- drag and drop, native picker, pasted path ---------- */
+function useFolder(d){
+  chosenFolder = d.path;
+  const box = $("#chosen");
+  box.classList.remove("hidden");
+  box.innerHTML = "<b>" + d.path + "</b><br>" + (d.images
+    ? d.images + " photos here. Ready to start."
+    : "No photos directly here. Subfolders are still included.");
+  $("#step-run").classList.remove("hidden");
+  $("#pathBox").value = d.path;
+}
+
+async function resolveText(text){
+  const r = await fetch("/api/resolve", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body: JSON.stringify({text})});
+  if(!r.ok) return null;
+  return await r.json();
+}
+
+const drop = $("#drop");
+["dragenter","dragover"].forEach(ev =>
+  window.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(ev =>
+  window.addEventListener(ev, e => {
+    if(ev === "dragleave" && e.relatedTarget) return;
+    drop.classList.remove("hot");
+  }));
+
+window.addEventListener("drop", async e => {
+  e.preventDefault();
+  const dt = e.dataTransfer;
+  // Windows Explorer usually puts the real path into the drag as text as well.
+  // That is the only way a browser will tell us where a dropped folder lives.
+  for(const type of ["text/uri-list", "text/plain"]){
+    const text = dt.getData(type);
+    if(text){
+      const d = await resolveText(text);
+      if(d){ useFolder(d); return; }
+    }
+  }
+  // No path in the drag.  Say so plainly and offer the picker rather than
+  // guessing at which folder on the machine was meant.
+  let name = "";
+  if(dt.items && dt.items.length && dt.items[0].webkitGetAsEntry){
+    const entry = dt.items[0].webkitGetAsEntry();
+    if(entry) name = entry.name;
+  }
+  drop.innerHTML = "<b>" + (name ? "Windows did not send the location of \u201c" + name + "\u201d"
+                                 : "Windows did not send the folder location")
+    + "</b><span class='or'>Click Browse and pick it, or paste the path below."
+    + "</span><span class='or'><button id='browseBtn'>Browse for it</button></span>";
+  wireBrowse();
+});
+
+function wireBrowse(){
+  const b = $("#browseBtn");
+  if(!b) return;
+  b.onclick = async () => {
+    b.disabled = true; b.textContent = "Choose the folder...";
+    try{
+      const r = await fetch("/api/pick", {method:"POST"});
+      if(r.ok){
+        const d = await r.json();
+        if(!d.cancelled) useFolder(d);
+      } else {
+        alert("Could not open the folder chooser. Paste the folder path instead.");
+      }
+    } finally { b.disabled = false; b.textContent = "Browse for it"; }
+  };
+}
+wireBrowse();
+
+$("#pathBtn").onclick = async () => {
+  const text = $("#pathBox").value.trim();
+  if(!text) return;
+  const d = await resolveText(text);
+  if(d) useFolder(d); else alert("That folder is not on this machine.");
+};
+$("#pathBox").addEventListener("keydown", e => { if(e.key === "Enter") $("#pathBtn").click(); });
+
+/* ---------- run ---------- */
+$("#conf").oninput = e => $("#confVal").textContent = e.target.value;
+$("#mar").oninput  = e => $("#marVal").textContent  = e.target.value;
+
+$("#runBtn").onclick = async () => {
+  if(!chosenFolder){ alert("Choose a folder first."); return; }
+  $("#runBtn").disabled = true;
+  const body = { folder: chosenFolder, confidence: +$("#conf").value,
+                 review: 35, margin: +$("#mar").value, enhance: $("#enh").checked };
+  const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"},
+                                     body: JSON.stringify(body)});
+  if(!r.ok){ alert("Could not start: " + (await r.text())); $("#runBtn").disabled=false; return; }
+  $("#step-progress").classList.remove("hidden");
+  poll();
+};
+
+async function poll(){
+  const d = await (await fetch("/api/progress")).json();
+  const pct = d.total ? Math.round(100*d.done/d.total) : 0;
+  $("#barFill").style.width = pct + "%";
+  $("#progText").textContent = d.total
+    ? d.done + " of " + d.total + " photos" : "Looking for photos...";
+  $("#log").textContent = d.log.join("\n");
+  if(d.running || d.total === 0){ setTimeout(poll, 600); return; }
+  $("#runBtn").disabled = false;
+  loadResults();
+}
+
+/* ---------- results ---------- */
+async function loadResults(){
+  const d = await (await fetch("/api/results")).json();
+  results = d.items;
+  queue = results.filter(x => x.bucket === "2_review" || x.bucket === "3_not_detected");
+  // Close-ups go last: they are usually a single keypress each, so getting the
+  // photos that need real work out of the way first is the better order.
+  queue.sort((a, b) => (a.note ? 1 : 0) - (b.note ? 1 : 0));
+  qi = 0;
+  showSweep();
+  const n = b => results.filter(x => x.bucket === b).length;
+  $("#tally").innerHTML =
+    pill("Cropped", n("1_cropped"), true) +
+    pill("Needs your eye", queue.length, false) +
+    (n("failed") ? pill("Failed", n("failed"), false) : "");
+  $("#step-review").classList.remove("hidden");
+  $("#step-all").classList.remove("hidden");
+  $("#allHint").textContent = results.length + " photos in " + d.folder
+    + " \u00b7 click a cropped one to see it beside the original";
+  showGrid();
+  showNext();
+}
+const pill = (label, count, on) =>
+  '<span class="pill' + (on?" on":"") + '">' + label + ' <b>' + count + '</b></span>';
+
+function showDone(){
+  const strip = $("#doneStrip"), row = $("#doneRow");
+  if(!justDone.length){ strip.classList.add("hidden"); return; }
+  strip.classList.remove("hidden");
+  row.innerHTML = "";
+  justDone.slice(-4).reverse().forEach(item => {
+    const cell = document.createElement("div");
+    cell.className = "done-item";
+    const img = document.createElement("img");
+    // cache-buster: this file was written a moment ago
+    img.src = "/api/photo?kind=output&name=" + encodeURIComponent(item.name)
+            + "&t=" + Date.now();
+    img.alt = "the crop just saved for " + item.name;
+    const label = document.createElement("div");
+    label.className = "n";
+    label.textContent = item.name;
+    img.title = "click to see this crop beside the original photo";
+    img.onclick = () => openCompare(item);
+    const back = document.createElement("button");
+    back.textContent = "Undo";
+    back.onclick = async () => {
+      back.disabled = true;
+      if(!await undoCrop(item)) back.disabled = false;
+    };
+    cell.append(img, label, back);
+    row.append(cell);
+  });
+}
+
+/* Undo is reachable from the strip under the editor and from the comparison
+   view, and both want exactly the same thing to happen, so it lives here. */
+async function undoCrop(item){
+  const r = await fetch("/api/undo", {method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name: item.name})});
+  if(!r.ok){ alert("Could not undo that one."); return false; }
+  const d = await r.json();
+  item.bucket = d.bucket; item.edited = false;
+  justDone = justDone.filter(x => x.name !== item.name);
+  if(d.bucket !== "1_cropped" && !queue.some(x => x.name === item.name)){
+    queue.splice(qi, 0, item);          // back at the front of the line
+  }
+  refreshTally(); showGrid(); showSweep(); showDone(); showNext();
+  return true;
+}
+
+function showSweep(){
+  const box = $("#sweep");
+  const pending = queue.slice(qi).filter(x => x.note);
+  if(!pending.length){ box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  box.innerHTML = "<span><b>" + pending.length + "</b> photos look like close-ups: "
+    + "the parchi fills the whole picture, so there is probably nothing to crop. "
+    + "Check the thumbnails below, then clear them together.</span>";
+  const btn = document.createElement("button");
+  btn.textContent = "Keep all " + pending.length + " as they are";
+  btn.onclick = async () => {
+    btn.disabled = true;
+    for(const item of pending){
+      const r = await fetch("/api/keep", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({name:item.name})});
+      if(r.ok){ item.bucket = "1_cropped"; item.edited = true; }
+    }
+    queue = queue.filter(x => !x.edited);
+    qi = Math.min(qi, queue.length);
+    refreshTally(); showGrid(); showSweep(); showNext();
+  };
+  box.append(btn);
+}
+
+function showGrid(){
+  const g = $("#grid"); g.innerHTML = "";
+  results.forEach(item => {
+    const t = document.createElement("div"); t.className = "tile";
+    const img = document.createElement("img"); img.loading = "lazy";
+    const finished = item.bucket === "1_cropped";
+    img.src = "/api/photo?kind=" + (finished ? "output" : "thumb")
+            + "&name=" + encodeURIComponent(item.name)
+            + (item.edited ? "&t=" + Date.now() : "");
+    img.title = finished ? "the crop that was saved" : "the original photo";
+    const cap = document.createElement("div"); cap.className = "cap";
+    const state = item.edited ? "fixed by hand"
+                : item.note ? item.note
+                : item.bucket === "1_cropped" ? "cropped " + item.score + "%"
+                : item.bucket === "2_review" ? "needs a look " + item.score + "%"
+                : item.bucket === "failed" ? "failed" : "not found";
+    cap.textContent = item.name + " · " + state;
+    t.append(img, cap);
+    t.title = finished ? "click to see the crop beside the original photo"
+                       : "click to open this photo in the editor";
+    t.onclick = () => openCompare(item);
+    g.append(t);
+  });
+}
+
+/* ---------- original beside the crop, after the fact ----------
+   The editor answers "will this crop be right?".  This answers "was it?", for
+   any photo already filed as cropped, without having to open the folder in
+   Explorer and line two windows up by hand. */
+let cmpItem = null;
+const croppedList = () => results.filter(x => x.bucket === "1_cropped");
+
+function openCompare(item){
+  // Nothing has been cropped yet for the others, so there is nothing to
+  // compare: those go straight to the editor, as they always did.
+  if(item.bucket !== "1_cropped"){ sendToEditor(item); return; }
+  cmpItem = item;
+  $("#cmpName").textContent = item.name;
+  $("#cmpState").textContent =
+      item.edited ? "cropped by hand"
+    : item.note  ? item.note + ", kept whole"
+    :              "cropped on its own, " + item.score + "% sure";
+  const a = $("#cmpA"), b = $("#cmpB");
+  a.alt = "the original photo of " + item.name;
+  b.alt = "the crop saved for " + item.name;
+  a.src = "/api/photo?kind=full&name=" + encodeURIComponent(item.name);
+  // the crop can have been rewritten a second ago, so never trust the cache
+  b.src = "/api/photo?kind=output&name=" + encodeURIComponent(item.name)
+        + "&t=" + Date.now();
+  const list = croppedList(), at = list.findIndex(x => x.name === item.name);
+  $("#cmpPrev").disabled = at <= 0;
+  $("#cmpNext").disabled = at < 0 || at >= list.length - 1;
+  $("#cmpUndo").disabled = false;
+  $("#compare").classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+
+function stepCompare(delta){
+  if(!cmpItem) return;
+  const list = croppedList();
+  const next = list[list.findIndex(x => x.name === cmpItem.name) + delta];
+  if(next) openCompare(next);
+}
+
+function closeCompare(){
+  $("#compare").classList.add("hidden");
+  document.body.style.overflow = "";
+  $("#cmpA").removeAttribute("src");
+  $("#cmpB").removeAttribute("src");
+  cmpItem = null;
+}
+
+function sendToEditor(item){
+  closeCompare();
+  const at = queue.findIndex(q => q.name === item.name);
+  qi = at >= 0 ? at : (queue.push(item) - 1);
+  showNext();
+  $("#step-review").scrollIntoView({behavior:"smooth"});
+}
+
+/* ---------- how the editor is laid out ----------
+   Side by side is the default: the crop you are about to make, at the same
+   size as the photo, is the only honest answer to "is this right?".  Some
+   photos need the corners placed to the pixel, and for those the photo can
+   take the full width with the result underneath instead. */
+const sideBySide = () => localStorage.getItem("crop.layout") !== "wide";
+
+function paintLayoutToggle(){
+  const btn = document.querySelector("#btnLayout");
+  if(!btn) return;
+  btn.textContent = sideBySide() ? "Bigger photo, result below"
+                                 : "Show result side by side";
+  btn.title = sideBySide()
+    ? "Give the photo the full width, and put the crop underneath"
+    : "Put the crop beside the photo, at the same size";
+  btn.onclick = () => {
+    localStorage.setItem("crop.layout", sideBySide() ? "wide" : "side");
+    const stage = document.querySelector("#stage");
+    if(stage) stage.classList.toggle("wide", !sideBySide());
+    paintLayoutToggle();
+    // the photo just changed width, so the handles have to be re-placed on it
+    requestAnimationFrame(() => {
+      if(quad && qi < queue.length && measure(queue[qi])) draw();
+    });
+  };
+}
+
+/* ---------- corner editor ---------- */
+function showNext(){
+  const wrap = $("#editorWrap");
+  if(qi >= queue.length){
+    wrap.innerHTML = '<div class="done">Nothing left to check. '
+      + 'Cropped photos are in the <b>_parchi\\1_cropped</b> folder.</div>';
+    return;
+  }
+  const item = queue[qi];
+  wrap.innerHTML =
+    '<div class="stage' + (sideBySide() ? '' : ' wide') + '" id="stage">'
+    + '<div class="frame" id="frame"><span class="tag">Original photo</span>'
+    + '<div class="canvasbox">'
+    + '<img id="shot" alt="' + item.name + '">'
+    + '<svg id="ov"><polygon class="quad" id="poly"></polygon></svg>'
+    + '<div class="loupe hidden" id="loupe"><canvas width="150" height="150">'
+    + '</canvas><div class="cross"></div></div></div></div>'
+    + '<div class="after" id="preview"><span class="tag">What you will get</span>'
+    + '<div class="note">preparing preview&hellip;</div></div>'
+    + '<div class="side"><div class="meta"><b>' + item.name + '</b><br>'
+    + (qi+1) + ' of ' + queue.length + ' to check<br>'
+    + (item.note ? item.note + ', probably nothing to crop'
+                 : item.quad ? 'detection was ' + item.score + '% sure'
+                             : 'nothing found, drag the corners')
+    + '</div>'
+    + '<button class="layout-toggle" id="btnLayout"></button>'
+    + '<label class="magnet"><input type="checkbox" id="magnet"> '
+    + 'Magnet: snap the outline to the paper edges</label>'
+    + '<button class="primary" id="btnCrop">Crop to these corners</button>'
+    + '<button id="btnSnap">Snap to edges now</button>'
+    + '<button id="btnKeep">Keep the whole photo</button>'
+    + '<button id="btnSkip">Skip for now</button></div></div>';
+  paintLayoutToggle();
+
+  const img = $("#shot");
+  img.onload = () => {
+    measure(item);
+    // Detection can put a corner outside the picture, and a handle you cannot
+    // see is a handle you cannot drag.  Keep every corner just inside the edge.
+    const inset = 6;
+    const hold = v => Math.max(inset, Math.min(v[2] - inset, v[0]));
+    quad = (item.quad ? item.quad.map(p => [p[0], p[1]])
+          : [[item.width*.12,item.height*.12],[item.width*.88,item.height*.12],
+             [item.width*.88,item.height*.88],[item.width*.12,item.height*.88]])
+          .map(p => [hold([p[0], 0, item.width]), hold([p[1], 0, item.height])]);
+    draw();
+    refreshPreview();
+  };
+  img.src = "/api/photo?kind=full&name=" + encodeURIComponent(item.name);
+  loadEdges(item.name);
+  const magnet = $("#magnet");
+  magnet.checked = localStorage.getItem("crop.magnet") !== "off";
+  magnet.onchange = () => localStorage.setItem("crop.magnet",
+                                               magnet.checked ? "on" : "off");
+  $("#btnSnap").onclick = () => snapNow(true);
+  $("#btnCrop").onclick = doCrop;
+  $("#btnKeep").onclick = doKeep;
+  $("#btnSkip").onclick = () => { qi++; showNext(); };
+}
+
+/* ---------- the magnet ----------
+   The edge map arrives once per photo as a small greyscale picture: bright
+   where the photo has an edge.  Dragging then snaps to the brightest nearby
+   pixel without asking the server anything, so it sticks instantly instead of
+   catching up a moment later. */
+let edgeMap = null;
+
+async function loadEdges(name){
+  edgeMap = null;
+  try{
+    const r = await fetch("/api/edges?name=" + encodeURIComponent(name));
+    if(!r.ok) return;
+    const blob = await r.blob();
+    const bitmap = await createImageBitmap(blob);
+    const cv = document.createElement("canvas");
+    cv.width = bitmap.width; cv.height = bitmap.height;
+    const ctx = cv.getContext("2d", {willReadFrequently:true});
+    ctx.drawImage(bitmap, 0, 0);
+    const px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+    const strength = new Uint8Array(cv.width * cv.height);
+    for(let i = 0; i < strength.length; i++) strength[i] = px[i*4];
+    edgeMap = {w: cv.width, h: cv.height, s: strength};
+  } catch(e){ edgeMap = null; }
+}
+
+// Pull a point in image coordinates onto the strongest edge near it.
+// Returns [point, didItStick].
+function magnet(p, item){
+  if(!edgeMap) return [p, false];
+  const sx = edgeMap.w / item.width, sy = edgeMap.h / item.height;
+  const cx = Math.round(p[0]*sx), cy = Math.round(p[1]*sy);
+  const reach = Math.max(6, Math.round(0.035 * Math.max(edgeMap.w, edgeMap.h)));
+  let best = -1, bx = cx, by = cy;
+  for(let y = cy - reach; y <= cy + reach; y++){
+    if(y < 0 || y >= edgeMap.h) continue;
+    for(let x = cx - reach; x <= cx + reach; x++){
+      if(x < 0 || x >= edgeMap.w) continue;
+      const d = Math.hypot(x - cx, y - cy);
+      if(d > reach) continue;
+      // Nearer edges win ties, so the outline does not leap across the photo.
+      const score = edgeMap.s[y*edgeMap.w + x] * (1 - 0.55 * d / reach);
+      if(score > best){ best = score; bx = x; by = y; }
+    }
+  }
+  if(best < 60) return [p, false];          // nothing worth sticking to
+  return [[bx/sx, by/sy], true];
+}
+
+let previewTimer = null, previewSeq = 0;
+function refreshPreview(){
+  const box = $("#preview");
+  if(!box || qi >= queue.length || !quad) return;
+  box.classList.add("stale");
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    const seq = ++previewSeq;
+    try{
+      const shot = document.querySelector("#shot");
+      const ref = shot && shot.clientWidth
+                ? Math.max(shot.clientWidth, shot.clientHeight)
+                : (box.getBoundingClientRect().width || 560);
+      const want = Math.max(400, Math.min(1400,
+                   Math.round(ref * Math.min(2, window.devicePixelRatio || 1) * 1.1)));
+      const r = await fetch("/api/preview", {method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({name: queue[qi].name, quad: quad.flat(), size: want})});
+      if(seq !== previewSeq) return;
+      const box2 = $("#preview");
+      if(!box2) return;
+      const tag = "<span class='tag'>What you will get</span>";
+      if(r.ok){
+        const url = URL.createObjectURL(await r.blob());
+        box2.innerHTML = tag + "<img alt='the crop this would produce'>";
+        const img = box2.querySelector("img");
+        img.onload = () => URL.revokeObjectURL(url);
+        img.src = url;
+      } else {
+        box2.innerHTML = tag + "<div class='note'>The four corners overlap, so "
+                       + "there is no crop to show. Drag them apart onto the "
+                       + "corners of the parchi.</div>";
+      }
+      box2.classList.remove("stale");
+    } catch(e){ /* the window was closed */ }
+  }, 180);
+}
+
+function measure(item){
+  const img = $("#shot");
+  if(!img) return false;
+  imgBox = {w: img.clientWidth, h: img.clientHeight, ow: item.width, oh: item.height};
+  $("#ov").setAttribute("viewBox", "0 0 " + imgBox.w + " " + imgBox.h);
+  return imgBox.w > 0;
+}
+
+let resizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    if(quad && qi < queue.length && measure(queue[qi])) draw();
+  }, 120);
+});
+
+const toView = p => [p[0]*imgBox.w/imgBox.ow, p[1]*imgBox.h/imgBox.oh];
+const toImg  = p => [p[0]*imgBox.ow/imgBox.w, p[1]*imgBox.oh/imgBox.h];
+
+let lastTouched = 0;
+
+/* ---------- the loupe ----------
+   On a busy photo you cannot see the pixel under your own cursor, which is the
+   precision limit once snapping is instant.  This shows the paper edge magnified
+   beside the handle while you drag, and gets out of the way on release. */
+function showLoupe(viewPoint){
+  const box = $("#loupe"), img = $("#shot");
+  if(!box || !img || !img.naturalWidth) return;
+  const zoom = 3.5, size = 150;
+  const cx = viewPoint[0] * img.naturalWidth  / imgBox.w;
+  const cy = viewPoint[1] * img.naturalHeight / imgBox.h;
+  const span = size / zoom;
+  const ctx = box.querySelector("canvas").getContext("2d");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, size, size);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, cx - span/2, cy - span/2, span, span, 0, 0, size, size);
+  // Sit the loupe away from the hand: above when dragging low, below when high.
+  const left = Math.max(4, Math.min(imgBox.w - size - 4, viewPoint[0] - size/2));
+  const top  = viewPoint[1] > size + 30 ? viewPoint[1] - size - 26 : viewPoint[1] + 26;
+  box.style.left = left + "px";
+  box.style.top  = Math.max(4, Math.min(imgBox.h - size - 4, top)) + "px";
+  box.classList.remove("hidden");
+}
+function hideLoupe(){ const b = $("#loupe"); if(b) b.classList.add("hidden"); }
+
+function draw(){
+  const ov = $("#ov");
+  const pts = quad.map(toView);
+  $("#poly").setAttribute("points", pts.map(p => p.join(",")).join(" "));
+  ov.querySelectorAll("circle").forEach(c => c.remove());
+  ov.querySelectorAll("line.sidegrab").forEach(l => l.remove());
+
+  // Whole sides are draggable too: when one edge of the parchi is off, moving
+  // that edge is one drag instead of two corners.
+  for(let i = 0; i < 4; i++){
+    const a = pts[i], b = pts[(i+1)%4];
+    const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+    line.setAttribute("x1",a[0]); line.setAttribute("y1",a[1]);
+    line.setAttribute("x2",b[0]); line.setAttribute("y2",b[1]);
+    line.setAttribute("class","sidegrab");
+    line.onpointerdown = ev => startSideDrag(ev, i, line);
+    ov.append(line);
+  }
+  pts.forEach((p, i) => {
+    const c = document.createElementNS("http://www.w3.org/2000/svg","circle");
+    c.setAttribute("cx", p[0]); c.setAttribute("cy", p[1]);
+    c.setAttribute("r", 11); c.setAttribute("class","hand");
+    c.onpointerdown = ev => {
+      ev.preventDefault(); c.setPointerCapture(ev.pointerId);
+      const move = e => {
+        const r = ov.getBoundingClientRect();
+        const x = Math.max(0, Math.min(imgBox.w, e.clientX - r.left));
+        const y = Math.max(0, Math.min(imgBox.h, e.clientY - r.top));
+        const [snapped, stuck] = magnet(toImg([x, y]), queue[qi]);
+        quad[i] = snapped; lastTouched = i;
+        draw();
+        showLoupe(toView(snapped));
+        const handle = ov.querySelectorAll("circle")[i];
+        if(handle && stuck) handle.classList.add("stuck");
+        refreshPreview();
+      };
+      const up = () => { ov.removeEventListener("pointermove", move);
+                         ov.removeEventListener("pointerup", up);
+                         hideLoupe();
+                         const m = $("#magnet");
+                         if(m && m.checked) snapNow(false); };
+      ov.addEventListener("pointermove", move);
+      ov.addEventListener("pointerup", up);
+    };
+    ov.append(c);
+  });
+}
+
+function say(message, good){
+  const meta = document.querySelector(".side .meta");
+  if(!meta) return;
+  let line = meta.querySelector(".snapmsg");
+  if(!line){
+    line = document.createElement("div");
+    line.className = "snapmsg";
+    meta.append(line);
+  }
+  line.textContent = message;
+  line.style.color = good ? "var(--accent)" : "var(--warn)";
+  clearTimeout(line._t);
+  line._t = setTimeout(() => { line.textContent = ""; }, 6000);
+}
+
+let snapping = false;
+async function snapNow(loud){
+  if(snapping || qi >= queue.length || !quad) return;
+  snapping = true;
+  const poly = $("#poly");
+  if(poly) poly.classList.add("snapping");
+  try{
+    const r = await fetch("/api/snap", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({name: queue[qi].name, quad: quad.flat()})});
+    if(r.ok){
+      const d = await r.json();
+      const before = JSON.stringify(quad.map(p => p.map(Math.round)));
+      quad = d.quad.map(p => [p[0], p[1]]);
+      draw();
+      refreshPreview();
+      if(!d.moved || JSON.stringify(quad.map(p => p.map(Math.round))) === before){
+        say("No edge found near the outline. Move the corners closer to the "
+            + "parchi and try again, or place them by hand.");
+      } else {
+        say("Snapped onto the edges, moved " + Math.round(d.moved) + "px.", true);
+      }
+    } else if(loud){
+      alert("Could not find the edges on this photo. Place the corners by hand.");
+    }
+  } catch(e){
+    if(loud) alert("Could not reach the tool. Is the Crop window still open?");
+  } finally {
+    snapping = false;
+    const p2 = $("#poly");
+    if(p2) p2.classList.remove("snapping");
+  }
+}
+
+function startSideDrag(ev, side, line){
+  ev.preventDefault();
+  const ov = $("#ov");
+  line.setPointerCapture(ev.pointerId);
+  const r = ov.getBoundingClientRect();
+  const from = [ev.clientX - r.left, ev.clientY - r.top];
+  const a = side, b = (side + 1) % 4;
+  const startA = quad[a].slice(), startB = quad[b].slice();
+
+  const move = e => {
+    const to = [e.clientX - r.left, e.clientY - r.top];
+    const dx = (to[0]-from[0]) * imgBox.ow / imgBox.w;
+    const dy = (to[1]-from[1]) * imgBox.oh / imgBox.h;
+    const hold = (v, max) => Math.max(0, Math.min(max, v));
+    let pa = [hold(startA[0]+dx, imgBox.ow), hold(startA[1]+dy, imgBox.oh)];
+    let pb = [hold(startB[0]+dx, imgBox.ow), hold(startB[1]+dy, imgBox.oh)];
+    const [sa] = magnet(pa, queue[qi]);
+    const [sb] = magnet(pb, queue[qi]);
+    quad[a] = sa; quad[b] = sb; lastTouched = a;
+    draw(); refreshPreview();
+    showLoupe(toView([(sa[0]+sb[0])/2, (sa[1]+sb[1])/2]));
+  };
+  const up = () => { ov.removeEventListener("pointermove", move);
+                     ov.removeEventListener("pointerup", up);
+                     hideLoupe();
+                     const m = $("#magnet");
+                     if(m && m.checked) snapNow(false); };
+  ov.addEventListener("pointermove", move);
+  ov.addEventListener("pointerup", up);
+}
+
+async function doCrop(){
+  const item = queue[qi];
+  const r = await fetch("/api/crop", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name:item.name, quad: quad.flat()})});
+  if(!r.ok){ alert("Could not crop: " + (await r.text())); return; }
+  // so "crop this one again" picks up where this left off, not at detection
+  item.quad = quad.map(pt => [pt[0], pt[1]]);
+  item.bucket = "1_cropped"; item.edited = true;
+  justDone.push(item);
+  qi++; refreshTally(); showGrid(); showSweep(); showDone(); showNext();
+}
+async function doKeep(){
+  const item = queue[qi];
+  const r = await fetch("/api/keep", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name:item.name})});
+  if(!r.ok){ alert("Could not save: " + (await r.text())); return; }
+  item.bucket = "1_cropped"; item.edited = true;
+  justDone.push(item);
+  qi++; refreshTally(); showGrid(); showSweep(); showDone(); showNext();
+}
+function refreshTally(){
+  const left = queue.slice(qi).length;
+  const cropped = results.filter(x => x.bucket === "1_cropped").length;
+  $("#tally").innerHTML = pill("Cropped", cropped, true) + pill("Left to check", left, false);
+}
+
+document.addEventListener("keydown", e => {
+  if(!$("#compare").classList.contains("hidden")){
+    if(e.key === "Escape") closeCompare();
+    else if(e.key === "ArrowLeft"){ e.preventDefault(); stepCompare(-1); }
+    else if(e.key === "ArrowRight"){ e.preventDefault(); stepCompare(1); }
+    return;                       // C and K must not fire behind the overlay
+  }
+  if(qi >= queue.length || !quad) return;
+  if(e.target.tagName === "INPUT") return;
+  const k = e.key.toLowerCase();
+  if(k === "c") doCrop();
+  else if(k === "k") doKeep();
+  else if(k === "s"){ qi++; showNext(); }
+  else if(k === "m") snapNow(true);
+  else if(e.key.startsWith("Arrow") && quad){
+    e.preventDefault();
+    const step = e.shiftKey ? 10 : 1;
+    const by = {ArrowLeft:[-step,0], ArrowRight:[step,0],
+                ArrowUp:[0,-step], ArrowDown:[0,step]}[e.key];
+    if(by){
+      quad[lastTouched] = [
+        Math.max(0, Math.min(queue[qi].width,  quad[lastTouched][0] + by[0])),
+        Math.max(0, Math.min(queue[qi].height, quad[lastTouched][1] + by[1]))];
+      draw(); refreshPreview();
+    }
+  }
+});
+
+$("#cmpClose").onclick = closeCompare;
+$("#cmpPrev").onclick  = () => stepCompare(-1);
+$("#cmpNext").onclick  = () => stepCompare(1);
+$("#cmpFix").onclick   = () => { if(cmpItem) sendToEditor(cmpItem); };
+$("#cmpUndo").onclick  = async () => {
+  if(!cmpItem) return;
+  const btn = $("#cmpUndo"), item = cmpItem;
+  btn.disabled = true;
+  if(await undoCrop(item)) closeCompare(); else btn.disabled = false;
+};
+$("#compare").onclick = e => { if(e.target.id === "compare") closeCompare(); };
+
+browse("");
+</script>
+</body>
+</html>
