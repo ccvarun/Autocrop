@@ -1,28 +1,31 @@
 @echo off
+rem One window, not two.
+rem
+rem This used to launch the exe with START, which opened a second console and
+rem left this one printing "this window can be closed" while the other said
+rem "leave this window open".  Two black windows with opposite instructions is
+rem how "the main console is getting closed" was reported as a fault.
+rem
+rem Now the exe runs in THIS window.  It is the only one, closing it stops
+rem Crop, and that is what a person would expect closing it to do.
 setlocal
 cd /d "%~dp0"
-
-echo ============================================
-echo   Crop - parchi review page (start)
-echo ============================================
+title Crop-UI
 
 rem Prefer the built exe: a centre machine has no Python installed.
 rem Beside this file first, which is how it is shipped to a client, then the
 rem dist folder, which is where a local build leaves it.
 if exist "%~dp0crop-ui.exe" (
-    echo Starting Crop...
-    start "Crop-UI" "%~dp0crop-ui.exe"
-    goto :wait
+    "%~dp0crop-ui.exe"
+    goto :done
 )
 if exist "%~dp0crop-ui\crop-ui.exe" (
-    echo Starting Crop...
-    start "Crop-UI" "%~dp0crop-ui\crop-ui.exe"
-    goto :wait
+    "%~dp0crop-ui\crop-ui.exe"
+    goto :done
 )
 if exist "dist\crop-ui.exe" (
-    echo Starting Crop...
-    start "Crop-UI" "dist\crop-ui.exe"
-    goto :wait
+    "dist\crop-ui.exe"
+    goto :done
 )
 
 rem Otherwise run from source, using the build environment if it exists.
@@ -44,18 +47,9 @@ if errorlevel 1 (
     if errorlevel 1 goto :nopip
 )
 
-echo Starting Crop...
-start "Crop-UI" cmd /c "%PY% cropui.py"
+%PY% cropui.py
 
-:wait
-echo Waiting for it to come up...
-timeout /t 4 >nul
-echo.
-echo Crop is running at http://127.0.0.1:8112
-echo A browser tab should have opened.  If not, open that address yourself.
-echo To stop it, run STOP_Crop.bat.
-echo This window can be closed.
-timeout /t 4 >nul
+:done
 exit /b 0
 
 :nopython

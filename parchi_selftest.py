@@ -386,6 +386,103 @@ def main():
         bad, why = pdfout.build_pdf(pages, work / "bad.pdf", page_size="postcard")
         check("an unknown page size is refused", bad is None and "unknown" in why, why)
 
+        print("\n[brightness and contrast clip, they do not wrap]")
+        # cv2.convertScaleAbs takes the ABSOLUTE value before clamping, so
+        # darkening or raising contrast sent black back up towards white.  At
+        # contrast 1.5 every level under 43 came out inverted, which is ink
+        # and shadow on a bill: 5 percent of the pixels on a real parchi, up
+        # to 64 levels out.  These check the property, not the arithmetic.
+        ramp = np.arange(256, dtype=np.uint8).reshape(1, 256, 1).repeat(3, axis=2)
+        darker = parchi.adjust(ramp, -40, 1.0)
+        check("darkening cannot make black brighter", int(darker[0, 0, 0]) == 0,
+              int(darker[0, 0, 0]))
+        check("darkening moves every level down or holds it",
+              bool((darker[0, :, 0].astype(int) <= ramp[0, :, 0].astype(int)).all()))
+        harder = parchi.adjust(ramp, 0, 1.5)
+        check("contrast cannot make black brighter", int(harder[0, 0, 0]) == 0,
+              int(harder[0, 0, 0]))
+        check("contrast leaves mid grey where it was",
+              abs(int(harder[0, 128, 0]) - 128) <= 1, int(harder[0, 128, 0]))
+        check("more contrast never lightens a dark tone",
+              bool((harder[0, :128, 0].astype(int)
+                    <= ramp[0, :128, 0].astype(int)).all()))
+        check("more contrast never darkens a light tone",
+              bool((harder[0, 129:, 0].astype(int)
+                    >= ramp[0, 129:, 0].astype(int)).all()))
+        softer = parchi.adjust(ramp, 0, 0.7)
+        check("less contrast pulls both ends towards mid grey",
+              int(softer[0, 0, 0]) > 0 and int(softer[0, 255, 0]) < 255,
+              (int(softer[0, 0, 0]), int(softer[0, 255, 0])))
+        check("every level stays a level", parchi.adjust(ramp, 25, 1.3).dtype == np.uint8)
+        check("neutral settings return the picture untouched",
+              parchi.adjust(ramp, 0, 1.0) is ramp)
+
+        print("\n[making the photos smaller]")
+        # The synthetic photos are 1600x1200, under the 2000px default, so a
+        # test that used the default would exercise nothing.  These use a cap
+        # small enough to actually bite.
+        big = np.zeros((1200, 1600, 3), np.uint8)
+        big[:] = (40, 90, 200)
+        check("fit never enlarges", parchi.fit(big, 4000) is big)
+        check("fit at zero leaves it alone", parchi.fit(big, 0) is big)
+        small = parchi.fit(big, 800)
+        check("fit brings the longest side to the cap", small.shape[1] == 800,
+              small.shape)
+        check("fit keeps the shape of the photo",
+              abs(small.shape[0] / small.shape[1] - 1200 / 1600) < 0.01,
+              small.shape)
+
+        shrinkdir = work / "shrinkme"
+        shrinkdir.mkdir(parents=True, exist_ok=True)
+        originals = sorted(photos.glob("*.jpg"))[:3]
+        for f in originals:
+            shutil.copy2(f, shrinkdir / f.name)
+        before = {f.name: (shrinkdir / f.name).read_bytes() for f in originals}
+
+        res = parchi.shrink_folder(shrinkdir, longest=800, quality=85)
+        check("every photo was written", res["files"] == len(originals),
+              res["files"])
+        check("they went into _smaller",
+              Path(res["out"]).name == parchi.SMALLER_NAME, res["out"])
+        check("the copies really are smaller", res["after"] < res["before"],
+              (res["before"], res["after"]))
+        check("the originals are untouched, byte for byte",
+              all((shrinkdir / n).read_bytes() == b for n, b in before.items()))
+        made = sorted(Path(res["out"]).glob("*.jpg"))
+        check("one copy per photo", len(made) == len(originals), len(made))
+        sizes = [cv2.imread(str(m)).shape for m in made]
+        check("no copy is over the cap",
+              all(max(h, w) <= 800 for h, w, _ in sizes), sizes)
+
+        # the property that stops a second pass eating its own output
+        again = parchi.shrink_folder(shrinkdir, longest=800, quality=85)
+        check("a second pass reads the originals, not _smaller",
+              again["files"] == len(originals), again["files"])
+        check("and the copies do not shrink further",
+              again["after"] == res["after"], (res["after"], again["after"]))
+
+        # a photo already inside the cap is copied, never re-encoded
+        roomy = work / "roomy"
+        roomy.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(originals[0], roomy / originals[0].name)
+        wide = parchi.shrink_folder(roomy, longest=4000, quality=85)
+        copied = Path(wide["out"]) / originals[0].name
+        check("a photo already small enough is copied, not re-encoded",
+              copied.read_bytes() == (roomy / originals[0].name).read_bytes())
+        check("and it is reported as such",
+              wide["rows"][0][3] == "already small", wide["rows"][0])
+
+        cli = subprocess.run([sys.executable, str(HERE / "parchi.py"), "--no-pause",
+                              "--smaller", "--fit", "800", str(shrinkdir)],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        check("--smaller runs cleanly", cli.returncode == 0, cli.stdout[-300:])
+        check("and says what it saved",
+              "became" in cli.stdout and "smaller" in cli.stdout, cli.stdout[-300:])
+        check("and says the originals were not touched",
+              "have not been touched" in cli.stdout, cli.stdout[-200:])
+        check("it writes its own report",
+              (Path(res["out"]) / "smaller.csv").exists())
+
         print("\n[safety and input handling]")
         one = sorted(photos.glob("easy_*.jpg"))[0]
         rotated = work / "rotated.jpg"
@@ -411,6 +508,34 @@ def main():
         check("re-running does not eat its own output",
               processed == len(truth),
               "processed {} files on re-run, expected {}".format(processed, len(truth)))
+
+        # A run must not walk over work somebody did by hand.  The review page
+        # writes decided.csv; here we write it ourselves and put a recognisable
+        # file in its place, because what matters is that the run leaves the
+        # file alone, whoever made it.
+        outroot = photos / parchi.OUTDIR_NAME
+        settled = sorted((outroot / "1_cropped").glob("*.jpg"))
+        if settled:
+            mine = settled[0]
+            mine.write_bytes(b"this is the operator's own crop")
+            parchi.mark_decided(outroot, mine.name, "1_cropped")
+            kept = subprocess.run([sys.executable, str(HERE / "parchi.py"), "--no-pause",
+                                   str(photos)], capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL)
+            check("a second run leaves hand-finished photos alone",
+                  mine.read_bytes() == b"this is the operator's own crop",
+                  kept.stdout[-300:])
+            check("and says so",
+                  "left alone" in kept.stdout, kept.stdout[-300:])
+            check("a hand-finished photo is not filed for review as well",
+                  not (outroot / "2_review" / mine.name).exists())
+            fresh = subprocess.run([sys.executable, str(HERE / "parchi.py"), "--no-pause",
+                                    "--redo", str(photos)], capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL)
+            check("--redo crops it again",
+                  mine.read_bytes() != b"this is the operator's own crop", fresh.stdout[-300:])
+            check("--redo clears the record",
+                  not parchi.decided_path(outroot).exists())
 
         bad = subprocess.run([sys.executable, str(HERE / "parchi.py"), "--no-pause",
                               str(photos), "--confidence"],

@@ -13,6 +13,9 @@ _cropped/
 
 # photos: never commit anyone's parchis, and the receipt sets are not ours
 SAMPLES/
+From_Client/
+REAL_SAMPLES/
+_to_delete/
 _selftest_photos/
 demoted_debug/
 debug_*.jpg

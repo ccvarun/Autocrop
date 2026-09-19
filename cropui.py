@@ -14,6 +14,7 @@ Nothing is ever destroyed.  Originals stay where they are; every crop is
 written into the _parchi output folders beside them.
 """
 
+import csv
 import os
 import shutil
 import socket
@@ -50,7 +51,11 @@ JOB = {
     "total": 0,
     "log": [],
     "results": {},         # name -> {bucket, score, quad, width, height}
-    "opts": {"confidence": 0.62, "review": 0.35, "margin": 1, "enhance": False},
+    "leftAlone": 0,        # photos a person had already finished, not touched
+    "opts": {"confidence": 0.62, "review": 0.35, "margin": 1, "enhance": False,
+             "upright": False, "brightness": 0, "contrast": 1.0,
+             "fit": parchi.FIT_LONGEST, "quality": parchi.FIT_QUALITY},
+    "shrink": None,        # the "make photos smaller" job, when one is running
 }
 LOCK = threading.Lock()
 
@@ -325,8 +330,14 @@ class RunRequest(BaseModel):
     folder: str
     confidence: int = 62
     review: int = 35
+    upright: bool = False
     margin: int = 1
     enhance: bool = False
+    brightness: int = 0
+    contrast: float = 1.0
+    redo: bool = False
+    fit: int = parchi.FIT_LONGEST
+    quality: int = parchi.FIT_QUALITY
 
 
 def run_job(folder, opts):
@@ -334,11 +345,31 @@ def run_job(folder, opts):
     outroot = root / parchi.OUTDIR_NAME
     files = list(parchi.collect([str(root)]))
 
+    # What a person already settled by hand, on this folder, in some earlier
+    # session.  Running again used to crop these afresh and write the machine's
+    # answer over theirs: the file changed on disk, the page said "cropped",
+    # and the only clue was the size.  Their work wins.
+    if opts.get("redo"):
+        parchi.forget_all_decided(outroot)
+        decided = {}
+    else:
+        decided = parchi.load_decided(outroot)
+
     with LOCK:
         JOB.update(root=root.resolve(), outroot=outroot, running=True,
-                   done=0, total=len(files), log=[], results={}, opts=opts)
+                   done=0, total=len(files), log=[], results={}, opts=opts,
+                   leftAlone=0)
 
     for f in files:
+        if f.name in decided:
+            entry = settled_entry(f, decided[f.name])
+            line = "{}  already finished by hand, left alone".format(f.name)
+            with LOCK:
+                JOB["results"][f.name] = entry
+                JOB["log"].append(line)
+                JOB["done"] += 1
+                JOB["leftAlone"] = JOB.get("leftAlone", 0) + 1
+            continue
         try:
             bgr = parchi.load(f)
             quad, score = parchi.detect(bgr)
@@ -348,14 +379,33 @@ def run_job(folder, opts):
             outdir.mkdir(parents=True, exist_ok=True)
             if bucket == "1_cropped" and not note:
                 result = parchi.warp(bgr, quad, opts["margin"])
-                if opts["enhance"]:
-                    result = parchi.enhance_image(result)
-                parchi.save(result, outdir / f.name)
+                if opts.get("upright"):
+                    result = parchi.stand_upright(result)
+                result = parchi.finish(result, opts)
+                parchi.put_image(result, outdir / f.name, opts)
             else:
-                shutil.copy2(f, outdir / f.name)
+                parchi.put_original(f, outdir / f.name, opts, bgr)
             h, w = bgr.shape[:2]
+            # For a photo where the paper runs past the picture there are no
+            # four corners to place, but there is still background on the
+            # sides that do show.  Offer the operator that trim as the outline
+            # to start from; it is never applied without them.
+            trim = parchi.trim_to_frame(quad, bgr.shape)
+            runs_off = parchi.quad_touches_frame(quad, bgr.shape)
+            # how much of the frame the trim would actually remove.  On a
+            # photo whose paper runs off all four edges this is zero, and a
+            # trim that removes nothing must not be announced as one.
+            trim_takes = 0.0
+            if trim is not None:
+                # float(): the quad is float32 and numpy scalars do not
+                # survive JSON encoding, which takes /api/results down
+                kept = float((trim[2][0] - trim[0][0])
+                             * (trim[2][1] - trim[0][1])) / float(h * w)
+                trim_takes = round(max(0.0, 1.0 - kept), 3)
             entry = {"bucket": bucket, "note": note, "score": round(score * 100),
                      "quad": quad.tolist() if quad is not None else None,
+                     "trim": trim.tolist() if trim is not None else None,
+                     "runsOff": runs_off, "trimTakes": trim_takes,
                      "width": w, "height": h, "source": str(f), "edited": False,
                      # where this photo started, so an accidental crop can be undone
                      "origin": {"bucket": bucket,
@@ -364,8 +414,16 @@ def run_job(folder, opts):
                                           round(score * 100),
                                           "  " + note if note else "")
         except Exception as err:
+            # Only detection may have failed; the photo itself often loads
+            # perfectly.  Recording zero for its size makes the editor fold
+            # all four corners onto one point, and the page then blames the
+            # person for corners it placed there itself.  Ask the photo.
+            try:
+                fh, fw = parchi.load(f).shape[:2]
+            except Exception:
+                fh, fw = 0, 0
             entry = {"bucket": "failed", "note": "", "score": 0, "quad": None,
-                     "width": 0, "height": 0, "source": str(f), "edited": False,
+                     "width": fw, "height": fh, "source": str(f), "edited": False,
                      "error": "{}: {}".format(type(err).__name__, err)}
             line = "{}  failed: {}".format(f.name, err)
         with LOCK:
@@ -377,6 +435,26 @@ def run_job(folder, opts):
         JOB["running"] = False
 
 
+def settled_entry(path, bucket):
+    """A photo a person finished earlier: shown, listed, and not touched.
+
+    Detection is skipped deliberately.  It is the expensive part, and its
+    answer would only be a worse one than the person already gave.  The photo
+    is still measured so the editor can open on it if they want another go.
+    """
+    try:
+        h, w = parchi.load(path).shape[:2]
+    except Exception:
+        h, w = 0, 0
+    return {"bucket": bucket, "note": "finished by hand", "score": 100,
+            "quad": None, "trim": None, "runsOff": 0, "trimTakes": 0.0,
+            "width": w, "height": h, "source": str(path), "edited": True,
+            # No origin: this session did not crop it, so this session has
+            # nothing to put back.  Undo says so rather than inventing a copy
+            # of the original and calling it the earlier work.
+            "settled": True}
+
+
 @app.post("/api/run")
 def start_run(req: RunRequest):
     if JOB["running"]:
@@ -386,10 +464,89 @@ def start_run(req: RunRequest):
     if req.review > req.confidence:
         raise HTTPException(400, "review threshold cannot be above confidence")
     opts = {"confidence": req.confidence / 100.0, "review": req.review / 100.0,
-            "margin": req.margin, "enhance": req.enhance}
+            "upright": bool(req.upright),
+            "margin": req.margin, "enhance": req.enhance,
+            "brightness": int(req.brightness), "contrast": float(req.contrast),
+            "redo": bool(req.redo),
+            "fit": max(0, int(req.fit)), "quality": int(req.quality)}
     threading.Thread(target=run_job, args=(req.folder, opts), daemon=True).start()
     time.sleep(0.2)
     return {"ok": True}
+
+
+class ShrinkRequest(BaseModel):
+    folder: str
+    fit: int = parchi.FIT_LONGEST
+    quality: int = parchi.FIT_QUALITY
+
+
+def shrink_job(folder, fit, quality):
+    """The whole of "make photos smaller": no detection, no queue, no review."""
+    def step(n, total, name, note):
+        with LOCK:
+            job = JOB["shrink"]
+            if job is None:
+                return
+            job["done"] = n
+            job["total"] = total
+            job["log"].append("{}  {}".format(name, note or "done"))
+            job["log"] = job["log"][-12:]
+    try:
+        result = parchi.shrink_folder(folder, fit, quality, progress=step)
+        try:
+            out = Path(result["out"])
+            out.mkdir(parents=True, exist_ok=True)
+            with (out / "smaller.csv").open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["photo", "bytes_before", "bytes_after", "result"])
+                writer.writerows(result["rows"])
+        except OSError:
+            pass                     # a missing report must not fail the job
+        failed = [r[0] for r in result["rows"] if str(r[3]).startswith("failed")]
+        with LOCK:
+            JOB["shrink"].update(running=False, done=result["files"],
+                                 total=result["files"],
+                                 before=result["before"], after=result["after"],
+                                 out=result["out"], failed=failed)
+    except Exception as err:
+        with LOCK:
+            JOB["shrink"].update(running=False,
+                                 error="{}: {}".format(type(err).__name__, err))
+
+
+@app.post("/api/shrink")
+def start_shrink(req: ShrinkRequest):
+    with LOCK:
+        busy = JOB["running"] or (JOB["shrink"] or {}).get("running")
+    if busy:
+        raise HTTPException(409, "already running")
+    folder = Path(req.folder)
+    if not folder.is_dir():
+        raise HTTPException(400, "not a folder")
+    fit = max(0, int(req.fit))
+    quality = int(req.quality)
+    if not 40 <= quality <= 100:
+        raise HTTPException(400, "quality must be between 40 and 100")
+    files = list(parchi.collect([str(folder)]))
+    if not files:
+        raise HTTPException(400, "no photos in that folder")
+    with LOCK:
+        JOB["shrink"] = {"running": True, "done": 0, "total": len(files),
+                         "log": [], "folder": str(folder),
+                         "out": str(parchi.smaller_root(folder)),
+                         "before": 0, "after": 0, "failed": [], "error": ""}
+    threading.Thread(target=shrink_job, args=(str(folder), fit, quality),
+                     daemon=True).start()
+    time.sleep(0.2)
+    return {"ok": True, "total": len(files),
+            "out": str(parchi.smaller_root(folder))}
+
+
+@app.get("/api/shrink/progress")
+def shrink_progress():
+    with LOCK:
+        job = JOB["shrink"]
+        return dict(job) if job else {"running": False, "done": 0, "total": 0}
 
 
 @app.get("/api/progress")
@@ -400,6 +557,7 @@ def progress():
             counts[entry["bucket"]] = counts.get(entry["bucket"], 0) + 1
         return {"running": JOB["running"], "done": JOB["done"], "total": JOB["total"],
                 "log": JOB["log"][-12:], "counts": counts,
+                "leftAlone": JOB.get("leftAlone", 0),
                 "folder": str(JOB["root"]) if JOB["root"] else ""}
 
 
@@ -423,7 +581,7 @@ def encode(bgr, quality=82):
 
 
 @app.get("/api/photo")
-def photo(name: str, kind: str = "thumb", size: int = 1400):
+def photo(name: str, kind: str = "thumb", size: int = 1400, rotate: int = 0):
     with LOCK:
         entry = JOB["results"].get(name)
     if entry is None:
@@ -437,7 +595,7 @@ def photo(name: str, kind: str = "thumb", size: int = 1400):
     else:
         src = inside_root(entry["source"])
 
-    bgr = parchi.load(src)
+    bgr = parchi.turn(parchi.load(src), rotate)
     limit = 320 if kind == "thumb" else size
     h, w = bgr.shape[:2]
     scale = limit / float(max(h, w))
@@ -453,17 +611,28 @@ def photo(name: str, kind: str = "thumb", size: int = 1400):
 
 # Decoding a 12 megapixel photo takes long enough to feel laggy when the magnet
 # fires on every handle release, and it is always the same photo being edited.
-_LAST = {"name": None, "image": None}
+_LAST = {"key": None, "image": None}
 
 
-def cached_image(name, path):
-    if _LAST["name"] != name:
-        _LAST["name"], _LAST["image"] = name, parchi.load(path)
+def cached_image(name, path, rotate=0):
+    """The photo as the operator is looking at it, quarter turns included.
+
+    Rotation is applied to the PHOTO, not to the finished crop, so that the
+    outline, the edge map, the loupe and the corners the page sends all live
+    in one frame.  The alternative, turning only the result, leaves the two
+    panes at different angles and makes every pointer coordinate a
+    transform waiting to be got wrong.
+    """
+    turns = int(rotate) % 360
+    key = (name, turns)
+    if _LAST["key"] != key:
+        _LAST["key"] = key
+        _LAST["image"] = parchi.turn(parchi.load(path), turns)
     return _LAST["image"]
 
 
 @app.get("/api/edges")
-def edges(name: str, size: int = 700):
+def edges(name: str, size: int = 700, rotate: int = 0):
     """A small picture of where this photo's edges are.
 
     Sent once when a photo opens, so the page can make the outline stick to
@@ -476,7 +645,7 @@ def edges(name: str, size: int = 700):
     if entry is None:
         raise HTTPException(404, "unknown photo")
 
-    bgr = cached_image(name, inside_root(entry["source"]))
+    bgr = cached_image(name, inside_root(entry["source"]), rotate)
     height, width = bgr.shape[:2]
     scale = float(size) / max(height, width)
     work = cv2.resize(bgr, (max(1, int(width * scale)), max(1, int(height * scale))),
@@ -507,6 +676,7 @@ def edges(name: str, size: int = 700):
 
 
 class SnapRequest(BaseModel):
+    rotate: int = 0
     name: str
     quad: list
 
@@ -518,9 +688,20 @@ def snap(req: SnapRequest):
         entry = JOB["results"].get(req.name)
     if entry is None:
         raise HTTPException(404, "unknown photo")
-    points = np.array(req.quad, dtype="float32").reshape(4, 2)
-    bgr = cached_image(req.name, inside_root(entry["source"]))
+    bgr = cached_image(req.name, inside_root(entry["source"]), req.rotate)
+    points = usable_quad(np.array(req.quad, dtype="float32"), bgr.shape)
+
     snapped, shift = parchi.snap_to_edges(bgr, points)
+    # Two sides that come out nearly parallel intersect a very long way away,
+    # and the outline that comes back can be unusable.  Handing that to the
+    # page poisons every preview after it, and the page then reports it as
+    # corners the person placed badly.  Refuse to return a quad we would not
+    # accept back, and leave the outline where it was.
+    try:
+        snapped = usable_quad(snapped, bgr.shape)
+    except HTTPException:
+        return {"quad": points.tolist(), "moved": 0.0,
+                "note": "the edges did not give a usable outline"}
     return {"quad": snapped.tolist(), "moved": round(float(shift), 1)}
 
 
@@ -531,15 +712,27 @@ def usable_quad(points, shape):
     files it as a finished bill.
     """
     height, width = shape[:2]
-    points = np.asarray(points, dtype="float32").reshape(4, 2)
+    points = np.asarray(points, dtype="float32")
+    if points.size != 8:
+        raise HTTPException(400, "expected four corners, got {}"
+                                 .format(points.size // 2))
+    points = points.reshape(4, 2)
+
+    # A corner that arrived as null or NaN used to fall through to the area
+    # check, where every comparison against NaN is False, and come back out
+    # the far side reported as "drag the corners apart".  That sent someone
+    # looking for a mistake they had not made.  Say what actually happened.
+    if not np.isfinite(points).all():
+        raise HTTPException(400, "corner coordinates are not numbers")
+
     points[:, 0] = np.clip(points[:, 0], 0, width)
     points[:, 1] = np.clip(points[:, 1], 0, height)
     area = abs(cv2.contourArea(parchi.order_corners(points)))
     if area < 0.002 * width * height:
-        raise HTTPException(400, "those corners do not make a crop")
+        raise HTTPException(400, "those corners enclose almost nothing")
     sides = parchi.side_lengths(parchi.order_corners(points))
     if min(sides) < 12:
-        raise HTTPException(400, "those corners do not make a crop")
+        raise HTTPException(400, "two corners are almost on top of each other")
     return points
 
 
@@ -547,29 +740,45 @@ class PreviewRequest(BaseModel):
     name: str
     quad: list
     size: int = 900     # longest side of the picture sent back
+    rotate: int = 0     # quarter turns applied to the photo, 0/90/180/270
+    brightness: int = 0
+    contrast: float = 1.0
 
 
 # A preview is looked at and thrown away, so there is no reason to warp twelve
 # megapixels and then discard nine tenths of them.  Warping a scaled-down copy
 # gives the same picture for a fraction of the work, and this runs again every
 # time a corner moves, so the fraction is the whole point.
-_PREVIEW_SRC = {"name": None, "image": None, "scale": 1.0, "want": 0}
+_PREVIEW_SRC = {"key": None, "image": None, "scale": 1.0, "want": 0}
 
 
-def preview_source(name, bgr, want):
+def look(req):
+    """How this photo should be finished: the batch setting, with whatever
+    the operator has changed for this one photo on top."""
+    opts = dict(JOB["opts"])
+    opts["brightness"] = int(getattr(req, "brightness", 0))
+    opts["contrast"] = float(getattr(req, "contrast", 1.0))
+    return opts
+
+
+def preview_source(name, bgr, want, rotate=0):
     """A copy of the photo small enough to warp quickly, and how much it shrank.
 
     The crop is only part of the frame, so the source needs headroom above the
     size we want back; 2.5x leaves the result sharp for any parchi filling more
     than about a third of the photo, which is nearly all of them.
     """
-    # A copy made for a small pane is too soft for a big one, so a larger
-    # request rebuilds it; a smaller one is happily served from what is here.
-    if _PREVIEW_SRC["name"] != name or want > _PREVIEW_SRC["want"]:
+    # Keyed on the TURN as well as the name.  Keyed on the name alone, a
+    # request for the turned photo was served the unturned copy, and the
+    # corners then landed somewhere else entirely.  The same mistake as
+    # cached_image, made twice, so the key now carries everything the picture
+    # depends on.
+    key = (name, int(rotate) % 360)
+    if _PREVIEW_SRC["key"] != key or want > _PREVIEW_SRC["want"]:
         scale = min(1.0, (want * 2.5) / float(max(bgr.shape[:2])))
         small = bgr if scale >= 1.0 else cv2.resize(
             bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        _PREVIEW_SRC.update(name=name, image=small, want=want,
+        _PREVIEW_SRC.update(key=key, image=small, want=want,
                             scale=1.0 if scale >= 1.0 else scale)
     return _PREVIEW_SRC["image"], _PREVIEW_SRC["scale"]
 
@@ -586,18 +795,23 @@ def preview(req: PreviewRequest):
         entry = JOB["results"].get(req.name)
     if entry is None:
         raise HTTPException(404, "unknown photo")
-    points = np.array(req.quad, dtype="float32").reshape(4, 2)
-    bgr = cached_image(req.name, inside_root(entry["source"]))
+    # usable_quad does the reshaping: doing it here first turns a request
+    # with the wrong number of corners into a 500 instead of a clear refusal.
+    points = np.array(req.quad, dtype="float32")
+    bgr = cached_image(req.name, inside_root(entry["source"]), req.rotate)
     points = usable_quad(points, bgr.shape)
 
     want = max(240, min(1600, int(req.size)))
-    small, scale = preview_source(req.name, bgr, want)
+    small, scale = preview_source(req.name, bgr, want, req.rotate)
     try:
         result = parchi.warp(small, points * scale, JOB["opts"]["margin"])
     except HTTPException:
         raise
     except Exception:
         raise HTTPException(400, "those corners do not make a crop")
+    # The pane says "what you will get", so it has to include everything the
+    # saved file will have.  It used to skip the contrast lift entirely.
+    result = parchi.finish(result, look(req))
     limit = float(want) / max(result.shape[:2])
     if limit < 1.0:
         result = cv2.resize(result, None, fx=limit, fy=limit, interpolation=cv2.INTER_AREA)
@@ -607,10 +821,49 @@ def preview(req: PreviewRequest):
 class CropRequest(BaseModel):
     name: str
     quad: list          # eight numbers, in original image pixels
+    rotate: int = 0     # quarter turns applied to the photo, 0/90/180/270
+    brightness: int = 0
+    contrast: float = 1.0
+    full_size: bool = False
 
 
 class KeepRequest(BaseModel):
     name: str
+    full_size: bool = False
+
+
+PREVIOUS_DIR = "_previous"
+
+
+def stash_previous(name):
+    """Move aside the finished file a person made in an earlier session.
+
+    A photo settled before this run has no outline recorded, so undo cannot
+    rebuild it.  Cropping it again would therefore be the one action in this
+    page with no way back, and the thing it destroys is the work we went to
+    all this trouble to protect.  Keep the file instead of the recipe.
+    """
+    for bucket in parchi.BUCKETS:
+        candidate = JOB["outroot"] / bucket / name
+        if not candidate.exists():
+            continue
+        keep = JOB["outroot"] / PREVIOUS_DIR
+        try:
+            keep.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(candidate), str(keep / name))
+            return bucket
+        except OSError:
+            return None
+    return None
+
+
+def remember_earlier_work(entry, name):
+    """Give a settled photo something to undo to, the first time it is touched."""
+    if entry.get("origin") or not entry.get("settled"):
+        return
+    bucket = stash_previous(name)
+    if bucket:
+        entry["origin"] = {"bucket": bucket, "quad": None, "stashed": True}
 
 
 def clear_from_buckets(name):
@@ -630,21 +883,31 @@ def crop(req: CropRequest):
         entry = JOB["results"].get(req.name)
     if entry is None:
         raise HTTPException(404, "unknown photo")
-    points = np.array(req.quad, dtype="float32").reshape(4, 2)
-    bgr = parchi.load(inside_root(entry["source"]))
+    # usable_quad does the reshaping: doing it here first turns a request
+    # with the wrong number of corners into a 500 instead of a clear refusal.
+    points = np.array(req.quad, dtype="float32")
+    bgr = parchi.turn(parchi.load(inside_root(entry["source"])), req.rotate)
     points = usable_quad(points, bgr.shape)
 
     result = parchi.warp(bgr, points, JOB["opts"]["margin"])
-    if JOB["opts"]["enhance"]:
-        result = parchi.enhance_image(result)
+    result = parchi.finish(result, look(req))
 
+    with LOCK:
+        remember_earlier_work(entry, req.name)
     clear_from_buckets(req.name)
     outdir = JOB["outroot"] / "1_cropped"
     outdir.mkdir(parents=True, exist_ok=True)
-    parchi.save(result, outdir / req.name)
+    # full_size is the one per photo escape hatch: a parchi with very small or
+    # very faint writing, saved at its original size whatever the run says.
+    opts = dict(JOB["opts"])
+    if req.full_size:
+        opts["fit"] = 0
+    parchi.put_image(result, outdir / req.name, opts)
 
     with LOCK:
-        entry.update(bucket="1_cropped", quad=points.tolist(), edited=True, score=100)
+        entry.update(bucket="1_cropped", quad=points.tolist(), edited=True,
+                     score=100, settled=True)
+    parchi.mark_decided(JOB["outroot"], req.name, "1_cropped")
     return {"ok": True}
 
 
@@ -655,12 +918,18 @@ def keep(req: KeepRequest):
         entry = JOB["results"].get(req.name)
     if entry is None:
         raise HTTPException(404, "unknown photo")
+    with LOCK:
+        remember_earlier_work(entry, req.name)
     clear_from_buckets(req.name)
     outdir = JOB["outroot"] / "1_cropped"
     outdir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(inside_root(entry["source"]), outdir / req.name)
+    opts = dict(JOB["opts"])
+    if req.full_size:
+        opts["fit"] = 0
+    parchi.put_original(inside_root(entry["source"]), outdir / req.name, opts)
     with LOCK:
-        entry.update(bucket="1_cropped", edited=True, score=100)
+        entry.update(bucket="1_cropped", edited=True, score=100, settled=True)
+    parchi.mark_decided(JOB["outroot"], req.name, "1_cropped")
     return {"ok": True}
 
 
@@ -686,6 +955,10 @@ def undo(req: UndoRequest):
         raise HTTPException(404, "unknown photo")
     origin = entry.get("origin")
     if not origin:
+        if entry.get("settled"):
+            raise HTTPException(400, "This photo was finished by hand before "
+                                     "this run, so there is nothing here to go "
+                                     "back to. Crop it again, or start fresh.")
         raise HTTPException(400, "nothing to undo for that photo")
 
     clear_from_buckets(req.name)
@@ -693,18 +966,34 @@ def undo(req: UndoRequest):
     outdir.mkdir(parents=True, exist_ok=True)
     source = inside_root(entry["source"])
 
+    if origin.get("stashed"):
+        # the earlier session's own file, put back exactly as it was
+        stashed = JOB["outroot"] / PREVIOUS_DIR / req.name
+        if not stashed.exists():
+            raise HTTPException(400, "the earlier version is no longer there")
+        shutil.move(str(stashed), str(outdir / req.name))
+        with LOCK:
+            entry.update(bucket=origin["bucket"], quad=None, edited=True,
+                         settled=True, origin=None)
+        parchi.mark_decided(JOB["outroot"], req.name, origin["bucket"])
+        return {"ok": True, "bucket": origin["bucket"]}
+
     if origin["bucket"] == "1_cropped" and origin["quad"]:
         points = np.array(origin["quad"], dtype="float32").reshape(4, 2)
         bgr = cached_image(req.name, source)
         result = parchi.warp(bgr, points, JOB["opts"]["margin"])
-        if JOB["opts"]["enhance"]:
-            result = parchi.enhance_image(result)
-        parchi.save(result, outdir / req.name)
+        # undo rebuilds the crop the RUN made, so the run's settings, not
+        # whatever the operator had the sliders on a moment ago
+        result = parchi.finish(result, JOB["opts"])
+        parchi.put_image(result, outdir / req.name, JOB["opts"])
     else:
-        shutil.copy2(source, outdir / req.name)
+        parchi.put_original(source, outdir / req.name, JOB["opts"])
 
     with LOCK:
-        entry.update(bucket=origin["bucket"], quad=origin["quad"], edited=False)
+        entry.update(bucket=origin["bucket"], quad=origin["quad"], edited=False,
+                     settled=False)
+    # undo means undo: a later run may touch this photo again
+    parchi.forget_decided(JOB["outroot"], req.name)
     return {"ok": True, "bucket": origin["bucket"]}
 
 
@@ -724,15 +1013,37 @@ def port_is_free(port):
         return probe.connect_ex((HOST, port)) != 0
 
 
+def hold_window():
+    """Wait for a keypress, so a console that failed does not just vanish.
+
+    Crop is started by double-clicking a .bat, which opens a window and closes
+    it the moment the program ends.  Every message this program printed about
+    WHY it could not start went with it: the operator saw a black window blink
+    and had nothing to report but "it does not work".  parchi.py has had this
+    since the beginning; cropui.py never got it.  Only on failure: a normal
+    stop should close cleanly, and /api/shutdown calls os._exit anyway.
+    """
+    try:
+        if sys.stdin and sys.stdin.isatty():
+            input("\nPress Enter to close this window...")
+    except (EOFError, KeyboardInterrupt, ValueError):
+        pass
+
+
 def main():
     port = PORT
     if not port_is_free(port):
         print("Port {} is already in use.".format(port))
-        print("Crop may already be running.  Run STOP_Crop.bat first.")
+        print("")
+        print("Crop is most likely already running: look for a window called")
+        print("Crop-UI, or open http://{}:{} in your browser.".format(HOST, port))
+        print("If you cannot find it, run STOP_Crop.bat and start again.")
         return 1
     url = "http://{}:{}".format(HOST, port)
     print("Crop is running at {}".format(url))
-    print("Leave this window open.  To stop it, run STOP_Crop.bat.")
+    print("")
+    print("Leave this window open while you work.  This is the only one:")
+    print("closing it stops Crop.  STOP_Crop.bat does the same.")
     threading.Timer(1.2, lambda: webbrowser.open(url)).start()
     uvicorn.run(app, host=HOST, port=port, log_level="warning",
                 loop="asyncio", http="h11")
@@ -740,4 +1051,20 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    except KeyboardInterrupt:
+        code = 0                      # Ctrl-C is somebody stopping it on purpose
+    except SystemExit as stop:
+        # uvicorn exits this way when it cannot bind the port at all
+        code = stop.code if isinstance(stop.code, int) else 1
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("")
+        print("Crop could not start.  The lines above say why.")
+        print("If you are reporting this, a photo of this window is enough.")
+        code = 1
+    if code:
+        hold_window()
+    sys.exit(code)

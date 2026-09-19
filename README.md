@@ -16,6 +16,9 @@ short queue.
 
 ![Comparing a finished crop against the photo it came from](docs/compare.png)
 
+<sub>Both screenshots use a synthetic bill drawn by the test suite. No real
+document, from anyone, is included in this repository.</sub>
+
 Nothing is ever deleted or overwritten. Your originals stay exactly as they
 are, and everything the tool makes goes into a new `_parchi` folder beside
 them.
@@ -29,8 +32,8 @@ is unsigned: "More info", then "Run anyway".
 ## Run from source
 
 ```
-git clone https://github.com/<your-username>/autocrop.git
-cd autocrop
+git clone https://github.com/ccvarun/Autocrop.git
+cd Autocrop
 python -m venv .venv-build
 .venv-build\Scripts\python.exe -m pip install -r requirements.txt
 .venv-build\Scripts\python.exe cropui.py
@@ -55,6 +58,13 @@ python cropui_selftest.py     # 66 checks, drives the real server on a spare por
 ```
 
 No sample photos are needed. The suites draw their own.
+
+## Working on it
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces fit together, the path a
+  photo takes, the endpoints, the invariants. Start here.
+- [AGENTS.md](AGENTS.md): what has already been tried, measured and rejected.
+  Read before changing detection, the audit or the paper mask.
 
 ## Licence
 

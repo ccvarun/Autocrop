@@ -31,10 +31,19 @@ from PIL import Image, ImageOps
 from pdfout import build_pdf
 import modelcand
 
-__version__ = "1.0"
+__version__ = "1.3"
 
 EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 OUTDIR_NAME = "_parchi"
+SMALLER_NAME = "_smaller"
+
+# What "make it smaller" means, unless somebody says otherwise.  Measured on 26
+# real parchis: the originals are 61.5 MB, and at 2000px/q90 they are 21.4 MB
+# with the pen and the Devanagari still legible at 1:1.  Going to 1600 or to
+# q85 saves more and starts to show; going to 2400 costs 8 MB for a difference
+# nobody can see at the size these are read.
+FIT_LONGEST = 2000
+FIT_QUALITY = 90
 
 # How much of the paper a finished crop may leave outside itself before it
 # counts as cutting into the bill.  Used in exactly two places: the veto in
@@ -59,11 +68,24 @@ USAGE = """parchi {v} : straighten and crop photographed paper slips
                          loosely cropped.  0-100, default 35.
     -m, --margin N       percent of extra paper left around a confident crop.
                          Default 1.
+    -b, --brightness N   lighten or darken the finished crop, -80 to 80.
+                         Default 0.
+        --contrast N     contrast on the finished crop, 50 to 200 percent.
+                         Default 100.  Pivots on mid grey, so raising it does
+                         not also shift the brightness.
     -e, --enhance        lift contrast so faint pen is easier to read.
                          Applies to cropped output only: the review and
                          not-detected folders hold untouched originals.
     -o, --out DIR        where the three folders go.  Default: a "_parchi"
                          folder beside the photos.
+        --smaller        do nothing but make the photos smaller.  No
+                         detection, no cropping: every photo is written,
+                         resized, into a "_smaller" folder beside them.
+        --fit N          longest side of every saved photo, in pixels.
+                         Default {fit}.  0 leaves the size alone.
+    -q, --quality N      JPEG quality of every saved photo, 40 to 100.
+                         Default {q}.
+        --full-size      same as --fit 0: save at the original size.
     -d, --debug          also write the detected outline drawn on each photo.
         --pdf            also put every finished page into one PDF, in file
                          name order, beside the output folders.
@@ -72,6 +94,8 @@ USAGE = """parchi {v} : straighten and crop photographed paper slips
                          outside it and name the ones worth looking at.
                          Exits with an error if any crop looks like it cut
                          into the bill.
+        --redo           start fresh: ignore decided.csv and crop every
+                         photo again, replacing any work done by hand.
         --no-pause       do not wait for a keypress at the end.
     -h, --help           this text.
 
@@ -80,9 +104,14 @@ USAGE = """parchi {v} : straighten and crop photographed paper slips
     _parchi/2_review         found something, not sure, loose crop
     _parchi/3_not_detected   original copied through untouched
     _parchi/report.csv       every photo with its score, for checking
+    _smaller/                with --smaller: resized copies, nothing else
+    _parchi/decided.csv      photos a person has already settled.  A second
+                             run on the same folder leaves these alone, so
+                             hand corrections survive.  Delete it, or pass
+                             --redo, to start over.
 
   Originals are never modified.
-""".format(v=__version__)
+""".format(v=__version__, fit=FIT_LONGEST, q=FIT_QUALITY)
 
 
 class ArgError(Exception):
@@ -708,6 +737,70 @@ def snap_to_edges(bgr, quad, bands=(5.0, 2.0, 1.0)):
 # output
 # --------------------------------------------------------------------------
 
+def quad_touches_frame(quad, shape, pad_pct=0.012):
+    """How many of the four frame edges the outline is already up against.
+
+    Two or more and the paper runs past the picture, so there are no four
+    corners to find and no perspective to correct.  Read off the outline
+    itself, with no paper mask involved, because the mask is the part of this
+    tool that cannot be trusted on a patterned background (see AGENTS.md).
+    """
+    if quad is None:
+        return 0
+    height, width = shape[:2]
+    q = order_corners(quad)
+    pad = pad_pct * max(height, width)
+    return int(sum((q[:, 0].min() <= pad, q[:, 1].min() <= pad,
+                    q[:, 0].max() >= width - pad, q[:, 1].max() >= height - pad)))
+
+
+def trim_to_frame(quad, shape, near=0.04):
+    """An outline that takes the background off the sides that have any.
+
+    For a photo where the paper runs past the edge of the picture there are no
+    four corners to find, and the tool currently hands such a photo back
+    untouched with strips of background still on it.  This is the other half
+    of the job: an axis-aligned box around what detection did find, with any
+    side already close to the frame pushed out TO the frame.
+
+    Two properties make it safe to OFFER.  It is never smaller than the box
+    around the detected outline, so it cannot cut anything that outline would
+    not have cut.  And on a side where the paper runs off the photo it removes
+    nothing at all.
+
+    It is a starting position for a person, not an answer.  Measured on 26 real
+    parchis it takes a median 30 percent of the frame off, and on four of six
+    inspected by eye it also clipped a second slip, a platform ticket along the
+    bottom or a coloured memo at the side.  It is offered as the outline the
+    editor opens with, never applied on its own.  There is no perspective
+    correction here and there cannot be: you cannot straighten a sheet whose
+    corners are outside the picture.
+    """
+    if quad is None:
+        return None
+    height, width = shape[:2]
+    q = order_corners(quad)
+    left, top = float(q[:, 0].min()), float(q[:, 1].min())
+    right, bottom = float(q[:, 0].max()), float(q[:, 1].max())
+
+    reach = near * max(height, width)
+    if left < reach:
+        left = 0.0
+    if top < reach:
+        top = 0.0
+    if right > width - reach:
+        right = float(width)
+    if bottom > height - reach:
+        bottom = float(height)
+
+    left, top = max(0.0, left), max(0.0, top)
+    right, bottom = min(float(width), right), min(float(height), bottom)
+    if right - left < 50 or bottom - top < 50:
+        return None
+    return np.array([[left, top], [right, top],
+                     [right, bottom], [left, bottom]], dtype="float32")
+
+
 def warp(bgr, quad, margin_pct):
     """Straighten the paper out of the photo."""
     quad = order_corners(quad)
@@ -730,12 +823,72 @@ def warp(bgr, quad, margin_pct):
 
 
 
+def turn(bgr, degrees):
+    """Rotate a finished crop by a quarter turn.
+
+    Done on the result, not on the corners: warp() normalises corner order
+    before it builds the transform, so re-ordering the quad to rotate would be
+    silently undone.  A quarter turn is a transpose and a flip, so this costs
+    nothing and resamples nothing.
+    """
+    d = int(degrees) % 360
+    if d == 90:
+        return cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
+    if d == 180:
+        return cv2.rotate(bgr, cv2.ROTATE_180)
+    if d == 270:
+        return cv2.rotate(bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return bgr
+
+
+def stand_upright(bgr):
+    """Put a crop on its short edge.  Parchis are taller than they are wide."""
+    height, width = bgr.shape[:2]
+    return turn(bgr, 90) if width > height else bgr
+
+
 def enhance_image(bgr):
     """Gentle lift so faint ballpoint is readable.  Not a black and white filter."""
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     lightness, a, b = cv2.split(lab)
     lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(lightness)
     return cv2.cvtColor(cv2.merge((lightness, a, b)), cv2.COLOR_LAB2BGR)
+
+
+def adjust(bgr, brightness=0, contrast=1.0):
+    """Brightness and contrast, the familiar pair, pivoting on mid grey.
+
+    Pivoting matters.  Scaling straight from zero means every contrast change
+    also shifts the brightness, so the two sliders fight each other and nobody
+    can get where they are going.
+    """
+    brightness, contrast = float(brightness), float(contrast)
+    if brightness == 0.0 and abs(contrast - 1.0) < 1e-3:
+        return bgr
+    offset = 128.0 * (1.0 - contrast) + brightness
+    # A lookup table, not convertScaleAbs.  convertScaleAbs takes the ABSOLUTE
+    # value before clamping, so darkening or raising contrast sent black back
+    # up towards white: at contrast 1.5 every level under 43 came out
+    # inverted, which is ink and shadow on a bill.  Measured at 5% of the
+    # pixels on a real parchi, up to 64 levels out.  Clipping is what a person
+    # expects and what every other program does.
+    table = np.clip(np.arange(256) * contrast + offset, 0, 255).astype(np.uint8)
+    return cv2.LUT(bgr, table)
+
+
+def finish(bgr, opts):
+    """Everything done to a crop after the warp, in one place.
+
+    The preview, the batch run, the crop endpoint and the command line tool
+    all come through here, so the picture a person approves is the picture
+    that gets written.  Before this existed, /api/preview skipped the contrast
+    lift that /api/crop applied, and the pane labelled "what you will get" was
+    quietly wrong every time that box was ticked.  Same rule as decide(): one
+    place, or two paths drift apart and nobody notices for a month.
+    """
+    if opts.get("enhance"):
+        bgr = enhance_image(bgr)
+    return adjust(bgr, opts.get("brightness", 0), opts.get("contrast", 1.0))
 
 
 def load(path):
@@ -745,15 +898,36 @@ def load(path):
         return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR)
 
 
-def save(bgr, path):
+def fit(bgr, longest):
+    """Bring the longest side down to `longest`, or leave it alone.
+
+    Never enlarges.  A photo already smaller than the cap is returned as it
+    is, which is what stops a second pass re-encoding the first pass's output.
+    INTER_AREA because this is always a reduction, and it averages rather than
+    samples: on a phone photo that quietly removes sensor noise, which is why
+    a shrunk parchi often looks cleaner than the original at 1:1.
+    """
+    if not longest:
+        return bgr
+    h, w = bgr.shape[:2]
+    if max(h, w) <= longest:
+        return bgr
+    scale = longest / float(max(h, w))
+    return cv2.resize(bgr, (max(1, int(round(w * scale))),
+                            max(1, int(round(h * scale)))),
+                      interpolation=cv2.INTER_AREA)
+
+
+def save(bgr, path, quality=92):
     suffix = path.suffix.lower()
+    quality = int(max(1, min(100, quality)))
     if suffix in (".jpg", ".jpeg"):
-        params = [cv2.IMWRITE_JPEG_QUALITY, 92]
+        params = [cv2.IMWRITE_JPEG_QUALITY, quality]
     elif suffix == ".png":
         params = [cv2.IMWRITE_PNG_COMPRESSION, 6]
     else:
         path = path.with_suffix(".jpg")
-        params = [cv2.IMWRITE_JPEG_QUALITY, 92]
+        params = [cv2.IMWRITE_JPEG_QUALITY, quality]
     ok = cv2.imwrite(str(path), bgr, params)
     if not ok:
         raise IOError("could not write {}".format(path))
@@ -818,6 +992,161 @@ def decide(bgr, quad, score, confidence, review):
     return bucket, ""
 
 
+# A person's decision, written down, so a later run cannot walk over it.
+DECIDED_NAME = "decided.csv"
+
+
+def decided_path(outroot):
+    return Path(outroot) / DECIDED_NAME
+
+
+def load_decided(outroot):
+    """Which photos a person has already settled, and where they put them.
+
+    Without this, running the tool twice on the same folder silently replaces
+    hand-made crops with automatic ones.  That is a day of somebody's work
+    gone with nothing on screen to say so, which is the exact failure this
+    tool exists to prevent.  The record is a plain CSV so it can be read, and
+    deleted, by anyone.
+    """
+    out = {}
+    path = decided_path(outroot)
+    if not path.exists():
+        return out
+    try:
+        with path.open("r", newline="", encoding="utf-8") as fh:
+            for row in csv.DictReader(fh):
+                name = (row.get("file") or "").strip()
+                if name:
+                    out[name] = (row.get("bucket") or "1_cropped").strip()
+    except (OSError, csv.Error):
+        return {}                      # unreadable is the same as not there
+    return out
+
+
+def mark_decided(outroot, name, bucket):
+    """Record that a person settled this photo.  Rewrites the whole file, so
+    the same photo decided twice leaves one row, not two."""
+    decided = load_decided(outroot)
+    decided[name] = bucket
+    return _write_decided(outroot, decided)
+
+
+def forget_all_decided(outroot):
+    """Start fresh.  Only for --redo, where every photo is being cropped again
+    anyway: leaving the record behind would have it claim photos were finished
+    by hand when an automatic crop had just replaced them."""
+    path = decided_path(outroot)
+    try:
+        if path.exists():
+            path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def forget_decided(outroot, name):
+    """Undo takes a photo back out of the record, so a later run may touch it
+    again.  Undo means undo."""
+    decided = load_decided(outroot)
+    if decided.pop(name, None) is None:
+        return True
+    return _write_decided(outroot, decided)
+
+
+def _write_decided(outroot, decided):
+    path = decided_path(outroot)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["file", "bucket"])
+            for name in sorted(decided):
+                writer.writerow([name, decided[name]])
+        return True
+    except OSError:
+        return False                   # never fail a crop over a bookkeeping file
+
+
+def put_image(bgr, out_path, opts):
+    """Write a picture we made, at the run's size setting."""
+    return save(fit(bgr, opts.get("fit", 0)), out_path, opts.get("quality", 92))
+
+
+def put_original(src, out_path, opts, bgr=None):
+    """Write a photo that is passing through uncropped.
+
+    With no size setting this is the byte-for-byte copy it always was, and
+    the promise that these folders hold the untouched original still holds.
+    With one, the copy is resized, because that is where most photos go: on
+    26 real parchis, 25 of them.  Shrinking only the cropped ones would have
+    saved 2 percent and looked like a feature.
+    """
+    longest = opts.get("fit", 0)
+    if longest:
+        if bgr is None:
+            bgr = load(src)
+        h, w = bgr.shape[:2]
+        if max(h, w) > longest:
+            return put_image(bgr, out_path, opts)
+    shutil.copy2(src, out_path)
+    return out_path
+
+
+def smaller_root(folder):
+    return Path(folder) / SMALLER_NAME
+
+
+def shrink_one(path, outdir, longest=FIT_LONGEST, quality=FIT_QUALITY):
+    """Write a smaller copy of one photo.  Returns (out_path, before, after).
+
+    A photo already inside the cap is copied byte for byte rather than
+    re-encoded.  Re-encoding it would lose a little quality for no saving,
+    and on a second pass over the same folder that loss would compound with
+    nothing on screen to say so.
+    """
+    before = path.stat().st_size
+    outdir.mkdir(parents=True, exist_ok=True)
+    bgr = load(path)
+    h, w = bgr.shape[:2]
+    if max(h, w) <= longest:
+        out = outdir / path.name
+        shutil.copy2(path, out)
+        return out, before, out.stat().st_size, False
+    out = save(fit(bgr, longest), outdir / path.name, quality)
+    return out, before, out.stat().st_size, True
+
+
+def shrink_folder(folder, longest=FIT_LONGEST, quality=FIT_QUALITY,
+                  progress=None):
+    """Make every photo in a folder smaller, into a _smaller folder beside them.
+
+    The originals are not touched, not moved and not overwritten: this only
+    ever writes into _smaller.  collect() already skips _parchi, and it skips
+    _smaller too, so running this twice reads the originals again rather than
+    shrinking the shrunk.
+    """
+    folder = Path(folder)
+    outdir = smaller_root(folder)
+    rows, before_total, after_total = [], 0, 0
+    files = list(collect([str(folder)]))
+    for n, f in enumerate(files, 1):
+        try:
+            out, before, after, resized = shrink_one(f, outdir, longest, quality)
+            rows.append([f.name, before, after,
+                         "resized" if resized else "already small"])
+            before_total += before
+            after_total += after
+            note = ""
+        except Exception as err:
+            rows.append([f.name, 0, 0, "failed: {}".format(err)])
+            note = "failed: {}".format(err)
+        if progress:
+            progress(n, len(files), f.name, note)
+    return {"folder": str(folder), "out": str(outdir), "files": len(files),
+            "before": before_total, "after": after_total, "rows": rows}
+
+
 def process(path, outroot, opts):
     bgr = load(path)
     quad, score = detect(bgr)
@@ -832,12 +1161,10 @@ def process(path, outroot, opts):
     outdir.mkdir(parents=True, exist_ok=True)
 
     if result is None:
-        out = outdir / path.name
-        shutil.copy2(path, out)          # untouched, byte for byte
+        out = put_original(path, outdir / path.name, opts, bgr)
     else:
-        if opts["enhance"]:
-            result = enhance_image(result)
-        out = save(result, outdir / path.name)
+        result = finish(result, opts)
+        out = put_image(result, outdir / path.name, opts)
 
     if opts["debug"]:
         debugdir = outroot / "_debug"
@@ -860,18 +1187,21 @@ def audit_crop(bgr, quad):
     h, w = bgr.shape[:2]
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     sat, val = hsv[:, :, 1], hsv[:, :, 2]
-    
+
     # Adaptive threshold handles lighting gradients and shadows perfectly
     k = int(min(h, w) * 0.5)
     if k % 2 == 0:
         k += 1
     k = max(3, k)
     thresh = cv2.adaptiveThreshold(val, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, k, 5)
-    
+
+    # NOTE: this calls a printed bedsheet paper.  A smoothness gate fixes that
+    # and breaks something worse; see "the paper mask" in AGENTS.md before
+    # touching it.  Do not "improve" this without reading that section.
     paper = ((sat < 90) & (thresh > 0)).astype(np.uint8) * 255
     paper = cv2.morphologyEx(paper, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8), iterations=2)
     paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8), iterations=2)
-    
+
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(paper, connectivity=4)
     inside = np.zeros(paper.shape, np.uint8)
     cv2.fillPoly(inside, [order_corners(quad).astype(np.int32)], 255)
@@ -910,7 +1240,10 @@ def collect(paths):
             print("  not found: {}".format(arg))
             continue
         for f in candidates:
-            if f.suffix.lower() not in EXTS or OUTDIR_NAME in f.parts:
+            # _smaller is skipped for the same reason as _parchi: a second
+            # pass must read the originals, never its own output.
+            if (f.suffix.lower() not in EXTS
+                    or OUTDIR_NAME in f.parts or SMALLER_NAME in f.parts):
                 continue
             try:
                 key = f.resolve()
@@ -938,8 +1271,11 @@ def as_int(name, raw, low, high):
 def parse_args(argv):
     paths = []
     opts = {"confidence": 0.62, "review": 0.35, "margin": 1,
-            "enhance": False, "debug": False, "audit": False,
-            "pdf": False, "page_size": None, "out": None, "pause": True}
+            "enhance": False, "brightness": 0, "contrast": 1.0,
+            "fit": FIT_LONGEST, "quality": FIT_QUALITY, "smaller": False,
+            "debug": False, "audit": False,
+            "pdf": False, "page_size": None, "out": None, "pause": True,
+            "redo": False}
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -971,6 +1307,12 @@ def parse_args(argv):
         elif name in ("-o", "--out"):
             opts["out"] = Path(value())
             i += 0 if sep else 1
+        elif name in ("-b", "--brightness"):
+            opts["brightness"] = as_int(name, value(), -80, 80)
+            i += 0 if sep else 1
+        elif name == "--contrast":
+            opts["contrast"] = as_int(name, value(), 50, 200) / 100.0
+            i += 0 if sep else 1
         elif name in ("-e", "--enhance"):
             opts["enhance"] = True
         elif name in ("-d", "--debug"):
@@ -982,6 +1324,18 @@ def parse_args(argv):
         elif name == "--a4":
             opts["pdf"] = True
             opts["page_size"] = "a4"
+        elif name == "--fit":
+            opts["fit"] = as_int(name, value(), 0, 20000)
+            i += 0 if sep else 1
+        elif name in ("-q", "--quality"):
+            opts["quality"] = as_int(name, value(), 40, 100)
+            i += 0 if sep else 1
+        elif name == "--full-size":
+            opts["fit"] = 0
+        elif name == "--smaller":
+            opts["smaller"] = True
+        elif name == "--redo":
+            opts["redo"] = True
         elif name == "--no-pause":
             opts["pause"] = False
         elif name in ("-v", "--version"):
@@ -994,6 +1348,46 @@ def parse_args(argv):
     if opts["review"] > opts["confidence"]:
         raise ArgError("--review cannot be higher than --confidence")
     return paths, opts
+
+
+def mb(n):
+    return "{:.1f} MB".format(n / 1e6)
+
+
+def shrink_main(paths, files, opts):
+    """--smaller: no detection, no buckets, just smaller copies."""
+    folder = Path(paths[0])
+    if not folder.is_dir():
+        folder = folder.parent
+    print("parchi {}   {} photos   longest side {}px, quality {}\n".format(
+        __version__, len(files), opts["fit"] or "unchanged", opts["quality"]))
+
+    def say(n, total, name, note):
+        print("  [{}/{}] {} ... {}".format(n, total, name, note or "done"))
+
+    result = shrink_folder(folder, opts["fit"], opts["quality"], progress=say)
+    failed = sum(1 for r in result["rows"] if str(r[3]).startswith("failed"))
+
+    report = Path(result["out"]) / "smaller.csv"
+    try:
+        Path(result["out"]).mkdir(parents=True, exist_ok=True)
+        with open(report, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["photo", "bytes_before", "bytes_after", "result"])
+            writer.writerows(result["rows"])
+    except OSError as err:
+        print("\ncould not write smaller.csv: {}".format(err))
+
+    before, after = result["before"], result["after"]
+    print("\n  {} photos   {} became {}".format(result["files"],
+                                                mb(before), mb(after)))
+    if before:
+        print("  {:.0f}% smaller".format(100.0 * (before - after) / before))
+    if failed:
+        print("  {} could not be read and were left out".format(failed))
+    print("\nOutput: {}".format(result["out"]))
+    print("Your original photos have not been touched.")
+    return (1 if failed else 0), opts["pause"]
 
 
 def main(argv):
@@ -1016,6 +1410,9 @@ def main(argv):
         print("No photos found.")
         return 0, opts["pause"]
 
+    if opts["smaller"]:
+        return shrink_main(paths, files, opts)
+
     outroot = opts["out"] or Path(paths[0]).parent / OUTDIR_NAME
     if Path(paths[0]).is_dir() and not opts["out"]:
         outroot = Path(paths[0]) / OUTDIR_NAME
@@ -1028,14 +1425,39 @@ def main(argv):
     failed = 0
     rows = []
     suspect = []
+    bytes_in = bytes_out = 0
+
+    # Photos a person has already settled.  Cropping them again would replace
+    # somebody's afternoon with a guess, and nothing on screen would say so.
+    if opts["redo"]:
+        forget_all_decided(outroot)
+        decided = {}
+    else:
+        decided = load_decided(outroot)
+    if decided:
+        print("  {} {} finished by hand before; leaving {} alone."
+              "  Pass --redo to crop everything again.\n".format(
+                  len(decided),
+                  "photo was" if len(decided) == 1 else "photos were",
+                  "it" if len(decided) == 1 else "them"))
+    left_alone = 0
 
     for n, f in enumerate(files, 1):
         print("  [{}/{}] {} ... ".format(n, len(files), f.name), end="", flush=True)
+        if f.name in decided:
+            bucket = decided[f.name]
+            if bucket in counts:
+                counts[bucket] += 1
+            left_alone += 1
+            print("already finished by hand, left alone")
+            rows.append([f.name, bucket, "", "finished by hand", f.name, "", ""])
+            continue
         try:
             bucket, score, out, note, quad = process(f, outroot, opts)
         except Exception as err:
             print("failed: {}: {}".format(type(err).__name__, err))
-            rows.append([f.name, "failed", "", "", "{}: {}".format(type(err).__name__, err)])
+            rows.append([f.name, "failed", "", "",
+                         "{}: {}".format(type(err).__name__, err), "", ""])
             failed += 1
             continue
         counts[bucket] += 1
@@ -1046,16 +1468,30 @@ def main(argv):
                 pass
         print("{}  ({:.0f}%){}".format(bucket.split("_", 1)[1], score * 100,
                                        "  " + note if note else ""))
-        rows.append([f.name, bucket, "{:.0f}".format(score * 100), note, out.name])
+        try:
+            bytes_in += f.stat().st_size
+            bytes_out += out.stat().st_size
+        except OSError:
+            pass
+        rows.append([f.name, bucket, "{:.0f}".format(score * 100), note, out.name,
+                     f.stat().st_size if f.exists() else "",
+                     out.stat().st_size if out.exists() else ""])
 
     report = outroot / "report.csv"
     try:
         with open(report, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["photo", "result", "confidence_percent", "note", "output"])
+            writer.writerow(["photo", "result", "confidence_percent", "note",
+                             "output", "bytes_before", "bytes_after"])
             writer.writerows(rows)
     except OSError as err:
         print("\ncould not write report.csv: {}".format(err))
+
+    if left_alone:
+        print("\n  {} {} already finished by hand and {} left alone.".format(
+            left_alone,
+            "photo was" if left_alone == 1 else "photos were",
+            "was" if left_alone == 1 else "were"))
 
     total = max(1, len(files) - failed)
     print("\n  cropped        {:>4}   {:.0f}%".format(counts["1_cropped"],
@@ -1084,6 +1520,15 @@ def main(argv):
             print("\n  PDF: {}  ({})".format(pdf_path, message))
         else:
             print("\n  PDF not written: {}".format(message))
+
+    if bytes_in:
+        print("\n  size: {} in, {} out".format(mb(bytes_in), mb(bytes_out)))
+        if bytes_out < bytes_in:
+            print("        {:.0f}% smaller at {}px, quality {}".format(
+                100.0 * (bytes_in - bytes_out) / bytes_in,
+                opts["fit"], opts["quality"]))
+        elif not opts["fit"]:
+            print("        saved at full size")
 
     print("\nOutput: {}".format(outroot))
     print("Check report.csv, then look through 2_review and 3_not_detected.")
